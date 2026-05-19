@@ -17,9 +17,11 @@ Everything else is forwarded to `DiscordChatExporter.Cli` unchanged, so the full
 # (e.g. ~/.local/share/dce-cli/, with a thin shim at ~/.local/bin/discordchatexporter).
 
 # 2. this wrapper
-pip install pyyaml
 git clone <this-repo>
-ln -s "$PWD/dce-sync/dce" /usr/local/bin/dce   # or add the repo to PATH
+cd dce-sync
+pip install .              # installs the `dce` console script (uses pyproject.toml)
+# or for local hacking: pip install -e .
+# or no-install: chmod +x dce && ln -s "$PWD/dce" ~/.local/bin/dce
 ```
 
 ## Quick start

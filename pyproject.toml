@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dce-sync"
+version = "0.1.0"
+description = "Thin wrapper around DiscordChatExporter.Cli with friendly channel names, parallel sync, dedup-merge, and archive verification."
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [{ name = "Pavel Srba", email = "srba@unify.cz" }]
+keywords = ["discord", "exporter", "archive", "cli"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: System Administrators",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Communications :: Chat",
+  "Topic :: System :: Archiving",
+]
+dependencies = ["PyYAML>=6"]
+
+[project.urls]
+Homepage = "https://github.com/srba/dce-sync"
+Issues = "https://github.com/srba/dce-sync/issues"
+
+[project.scripts]
+dce = "dce_sync:main"
+
+[tool.setuptools]
+py-modules = ["dce_sync"]
