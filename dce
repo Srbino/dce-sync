@@ -38,7 +38,7 @@ except ImportError:
     sys.exit("dce: missing dependency. Install with: pip install pyyaml")
 
 
-KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify"}
+KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify", "merge"}
 
 DEFAULT_CONFIG = Path.cwd() / "channels.yaml"
 TOKEN_FILE = Path.home() / ".config" / "dce-sync" / "token"
@@ -502,6 +502,124 @@ def cmd_stats(cfg: dict, config_path: Path, fast: bool) -> int:
     return 0
 
 
+_AFTER_RX = re.compile(r"(?P<prefix>.*) \(after (?P<date>\d{4}-\d{2}-\d{2})\)(?P<ext>\.json)$", re.I)
+
+
+def _pick_merge_target(files: list[Path]) -> Path:
+    """Pick the filename for the merged archive: reuse the latest `(after X)`
+    suffix among the inputs so `parse_last_after` continues to work and the
+    next sync resumes from the right point."""
+    latest = None
+    template = files[-1]
+    for fp in files:
+        m = _AFTER_RX.match(fp.name)
+        if not m:
+            continue
+        d = m.group("date")
+        if latest is None or d > latest:
+            latest = d
+            template = fp
+    return template.parent / template.name
+
+
+def cmd_merge(cfg: dict, config_path: Path, targets: list[str],
+              dry_run: bool, keep: bool) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    channels = cfg.get("channels") or {}
+    if not channels:
+        die("no channels registered")
+
+    requested = targets or list(channels.keys())
+    failed: list[str] = []
+    touched = 0
+
+    for name in requested:
+        if name not in channels:
+            print(f"  {name}: unknown", file=sys.stderr, flush=True)
+            failed.append(name)
+            continue
+        cid = str(channels[name]["id"])
+        files = _files_for_channel(output_dir, cid)
+        if len(files) < 2:
+            print(f"  {name}: {len(files)} file(s), nothing to merge", flush=True)
+            continue
+
+        merged: dict[str, dict] = {}
+        meta: dict = {}
+        raw_total = 0
+        load_failed = False
+        for fp in files:
+            try:
+                with open(fp) as fh:
+                    data = json.load(fh)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"  {name}: failed to read {fp.name}: {e}",
+                      file=sys.stderr, flush=True)
+                failed.append(name)
+                load_failed = True
+                break
+            msgs = data.get("messages") or []
+            raw_total += len(msgs)
+            for m in msgs:
+                mid = m.get("id")
+                if mid:
+                    merged[mid] = m
+            # keep metadata from the most recently-suffixed input
+            for k, v in data.items():
+                if k != "messages":
+                    meta[k] = v
+        if load_failed:
+            continue
+
+        sorted_msgs = sorted(merged.values(),
+                             key=lambda m: m.get("timestamp", ""))
+        target = _pick_merge_target(files)
+        dup = raw_total - len(sorted_msgs)
+        print(f"  {name}: {raw_total:,} msgs across {len(files)} files -> "
+              f"{len(sorted_msgs):,} unique ({dup:,} dups)", flush=True)
+
+        if dry_run:
+            print(f"    -> would write {target.name} "
+                  f"and remove {len(files) - 1} source file(s) (unless --keep)",
+                  flush=True)
+            touched += 1
+            continue
+
+        meta_out = dict(meta)
+        meta_out["messages"] = sorted_msgs
+        if "messageCount" in meta_out:
+            meta_out["messageCount"] = len(sorted_msgs)
+
+        tmp = target.with_name(target.name + ".tmp")
+        try:
+            with open(tmp, "w") as fh:
+                json.dump(meta_out, fh, ensure_ascii=False)
+            os.replace(tmp, target)
+        except OSError as e:
+            if tmp.exists():
+                tmp.unlink()
+            print(f"  {name}: write failed: {e}", file=sys.stderr, flush=True)
+            failed.append(name)
+            continue
+        print(f"    -> {target.name} ({_human_size(target.stat().st_size)})",
+              flush=True)
+
+        if not keep:
+            removed = 0
+            for fp in files:
+                if fp.resolve() != target.resolve():
+                    fp.unlink()
+                    removed += 1
+            if removed:
+                print(f"    -> removed {removed} source file(s) (use --keep to preserve)",
+                      flush=True)
+        touched += 1
+
+    if touched == 0 and not failed:
+        print("nothing to do")
+    return 1 if failed else 0
+
+
 def cmd_add(cfg: dict, config_path: Path, name: str, channel_id: str) -> int:
     cfg.setdefault("channels", {})
     if name in cfg["channels"]:
@@ -652,6 +770,8 @@ commands handled by dce:
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
   stats [--fast]                per-channel totals (files, msgs, size, date range)
   verify [--quick] [--filter R] sanity-check every JSON in output_dir parses
+  merge [name ...]              consolidate per-channel `(after X)` files; deduped by msg id
+                                  flags: --dry-run, --keep (don't delete source files)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
 
@@ -721,6 +841,16 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(config_path) if config_path.is_file() else {}
         return cmd_discover(cfg, config_path, token, dce, a.guild,
                             a.filter_re, a.write, a.include_threads)
+
+    if cmd == "merge":
+        p = argparse.ArgumentParser(prog="dce merge")
+        p.add_argument("channels", nargs="*")
+        p.add_argument("--dry-run", action="store_true")
+        p.add_argument("--keep", action="store_true",
+                       help="don't delete the per-after source files")
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path)
+        return cmd_merge(cfg, config_path, a.channels, a.dry_run, a.keep)
 
     if cmd == "verify":
         p = argparse.ArgumentParser(prog="dce verify")
