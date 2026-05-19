@@ -1,0 +1,26 @@
+# the user's real channel registry — example only is tracked
+channels.yaml
+
+# never commit token state
+Settings.dat
+.env
+.dce_token
+
+# exports
+*.json
+!package.json
+!pyproject.json
+exports/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+
+# editor
+.vscode/
+.idea/
+.DS_Store

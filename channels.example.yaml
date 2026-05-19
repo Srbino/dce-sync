@@ -1,0 +1,13 @@
+# dce channel registry. Copy to `channels.yaml` next to where you run `dce`
+# (or pass `--config PATH`).
+#
+# `output_dir` may be relative (resolved against this file's directory) or absolute.
+
+output_dir: .
+
+channels:
+  # name: { id: "<channel-id-as-string>" }
+  general:
+    id: "290936867199909888"
+  pvm:
+    id: "529041672999403554"

@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""dce — thin wrapper around DiscordChatExporter.Cli.
+
+Adds value where DCE.Cli is awkward:
+  - auto-token from the GUI's Settings.dat (single source of truth)
+  - friendly channel-name registry (channels.yaml)
+  - smart incremental sync (parses existing filenames to infer --after)
+
+Everything else passes through to DiscordChatExporter.Cli unchanged.
+
+Usage:
+  dce list                         show registered channels + last export date
+  dce sync                         incremental sync of all registered channels
+  dce sync pvm taming              sync only the named channels
+  dce sync --dry-run               print commands without executing
+  dce add NAME CHANNEL_ID          register a channel
+  dce guilds                       passthrough (DCE.Cli)
+  dce channels -g GUILD_ID         passthrough
+  dce export -c CID --after DATE   passthrough (full DCE.Cli API)
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    sys.exit("dce: missing dependency. Install with: pip install pyyaml")
+
+
+KNOWN_CMDS = {"list", "sync", "add"}
+
+DEFAULT_CONFIG = Path.cwd() / "channels.yaml"
+
+# Settings.dat candidates, checked in order. macOS DCE GUI sometimes stores
+# settings inside the .app bundle; the standard path is also tried.
+DEFAULT_SETTINGS_PATHS = [
+    Path.home() / "Library" / "Application Support" / "DiscordChatExporter" / "Settings.dat",
+    Path.home() / ".config" / "DiscordChatExporter" / "Settings.dat",
+]
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"dce: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def find_dce_binary() -> str:
+    for name in ("discordchatexporter", "DiscordChatExporter.Cli"):
+        path = shutil.which(name)
+        if path:
+            return path
+    die(
+        "DiscordChatExporter.Cli not found on PATH.\n"
+        "  install:  dotnet tool install -g DiscordChatExporter.Cli\n"
+        "  then add ~/.dotnet/tools to PATH (or the equivalent on your shell)"
+    )
+    return ""  # unreachable
+
+
+def load_token(explicit_path: str | None) -> str:
+    if os.environ.get("DCE_TOKEN"):
+        return os.environ["DCE_TOKEN"]
+
+    candidates: list[Path] = []
+    if explicit_path:
+        candidates.append(Path(explicit_path).expanduser())
+    candidates.extend(DEFAULT_SETTINGS_PATHS)
+
+    for p in candidates:
+        if not p.is_file():
+            continue
+        try:
+            data = json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        tok = data.get("LastToken")
+        if tok:
+            return tok
+
+    die(
+        "no token found.\n"
+        "  options: set DCE_TOKEN env var, pass --settings PATH, "
+        "or run DiscordChatExporter GUI once so Settings.dat gets populated."
+    )
+    return ""  # unreachable
+
+
+def load_config(path: Path) -> dict:
+    if not path.is_file():
+        die(
+            f"no channels file at {path}.\n"
+            f"  copy channels.example.yaml to {path.name} and edit, "
+            f"or pass --config PATH."
+        )
+    return yaml.safe_load(path.read_text()) or {}
+
+
+def save_config(path: Path, cfg: dict) -> None:
+    path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+
+
+def parse_last_after(output_dir: Path, channel_id: str) -> date | None:
+    """Scan existing JSON exports for the latest `(after YYYY-MM-DD)` marker for
+    this channel. Channel ID is matched in the filename, which is how
+    DiscordChatExporter names files."""
+    if not output_dir.is_dir():
+        return None
+    pattern = re.compile(r"\(after (\d{4}-\d{2}-\d{2})\)\.json$", re.I)
+    latest: date | None = None
+    for f in output_dir.iterdir():
+        if channel_id not in f.name:
+            continue
+        m = pattern.search(f.name)
+        if not m:
+            continue
+        try:
+            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if latest is None or d > latest:
+            latest = d
+    return latest
+
+
+def output_dir_from_cfg(cfg: dict, config_path: Path) -> Path:
+    raw = cfg.get("output_dir", ".")
+    p = Path(raw).expanduser()
+    if not p.is_absolute():
+        p = (config_path.parent / p).resolve()
+    return p
+
+
+def cmd_list(cfg: dict, config_path: Path) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    channels = cfg.get("channels") or {}
+    if not channels:
+        print("no channels registered. Use `dce add NAME CHANNEL_ID`.")
+        return 0
+    rows = []
+    for name, ch in channels.items():
+        cid = str(ch["id"])
+        last = parse_last_after(output_dir, cid)
+        rows.append((name, cid, str(last) if last else "(none)"))
+    w_n = max(len(r[0]) for r in rows)
+    w_i = max(len(r[1]) for r in rows)
+    print(f"output_dir: {output_dir}")
+    for n, i, l in rows:
+        print(f"  {n:<{w_n}}  {i:<{w_i}}  last_after={l}")
+    return 0
+
+
+def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
+             targets: list[str], dry_run: bool) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    channels = cfg.get("channels") or {}
+    if not channels:
+        die("no channels registered. Use `dce add NAME CHANNEL_ID`.")
+
+    requested = targets or list(channels.keys())
+    today = date.today()
+    failed: list[str] = []
+
+    for name in requested:
+        if name not in channels:
+            print(f"  {name}: unknown (try `dce list`)", file=sys.stderr)
+            failed.append(name)
+            continue
+        cid = str(channels[name]["id"])
+        last = parse_last_after(output_dir, cid)
+
+        if last and last >= today:
+            print(f"  {name}: up to date (last_after={last})")
+            continue
+
+        cmd = [
+            dce, "export",
+            "-t", token,
+            "-c", cid,
+            "-f", "Json",
+            "-o", str(output_dir) + os.sep,
+        ]
+        if last:
+            cmd += ["--after", last.isoformat()]
+
+        if dry_run:
+            redacted = ["<TOKEN>" if c == token else c for c in cmd]
+            print(f"  {name}: {' '.join(redacted)}")
+            continue
+
+        print(f"  {name}: exporting (after={last or 'beginning'})...")
+        rc = subprocess.call(cmd)
+        if rc != 0:
+            print(f"  {name}: FAILED (exit {rc})", file=sys.stderr)
+            failed.append(name)
+
+    return 1 if failed else 0
+
+
+def cmd_add(cfg: dict, config_path: Path, name: str, channel_id: str) -> int:
+    cfg.setdefault("channels", {})
+    if name in cfg["channels"]:
+        print(f"  {name}: already registered as {cfg['channels'][name]['id']} — overwriting")
+    cfg["channels"][name] = {"id": channel_id}
+    save_config(config_path, cfg)
+    print(f"added {name} -> {channel_id} (config: {config_path})")
+    return 0
+
+
+def cmd_passthrough(args: list[str], token: str, dce: str) -> int:
+    if "-t" not in args and "--token" not in args:
+        args = ["-t", token] + args
+    return subprocess.call([dce] + args)
+
+
+def split_our_flags(argv: list[str]) -> tuple[Path, str | None, list[str]]:
+    """Pull --config and --settings out of argv (used by all commands).
+
+    Returns: (config_path, settings_path, remaining_argv)."""
+    config_path = DEFAULT_CONFIG
+    settings_path: str | None = None
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--config" and i + 1 < len(argv):
+            config_path = Path(argv[i + 1]).expanduser().resolve()
+            i += 2
+            continue
+        if a == "--settings" and i + 1 < len(argv):
+            settings_path = argv[i + 1]
+            i += 2
+            continue
+        out.append(a)
+        i += 1
+    return config_path, settings_path, out
+
+
+HELP_TEXT = """\
+dce — DiscordChatExporter.Cli wrapper with friendly channel names + incremental sync.
+
+usage:
+  dce [--config PATH] [--settings PATH] <command> [...]
+
+commands handled by dce:
+  list                          show registered channels and last export date
+  sync [name ...]               incremental sync (default: all). --dry-run supported.
+  add NAME CHANNEL_ID           add a channel to channels.yaml
+
+anything else is forwarded to DiscordChatExporter.Cli with --token auto-injected:
+  dce guilds
+  dce channels -g GUILD_ID
+  dce export -c CHANNEL_ID --after 2026-05-01
+  dce exportguild -g GUILD_ID -f Json -o ./exports/
+
+token lookup order:
+  1. $DCE_TOKEN
+  2. --settings PATH  (Settings.dat from DiscordChatExporter GUI)
+  3. ~/Library/Application Support/DiscordChatExporter/Settings.dat   (macOS default)
+  4. ~/.config/DiscordChatExporter/Settings.dat                       (Linux default)
+"""
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+
+    if not argv or argv[0] in ("-h", "--help"):
+        print(HELP_TEXT)
+        return 0
+
+    config_path, settings_path, rest = split_our_flags(argv)
+    if not rest:
+        print(HELP_TEXT)
+        return 0
+
+    cmd = rest[0]
+    sub_argv = rest[1:]
+
+    # Token + binary are needed for every operation except --help, which we've handled.
+    token = load_token(settings_path)
+    dce = find_dce_binary()
+
+    if cmd == "list":
+        cfg = load_config(config_path)
+        return cmd_list(cfg, config_path)
+
+    if cmd == "sync":
+        p = argparse.ArgumentParser(prog="dce sync")
+        p.add_argument("channels", nargs="*")
+        p.add_argument("--dry-run", action="store_true")
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path)
+        return cmd_sync(cfg, config_path, token, dce, a.channels, a.dry_run)
+
+    if cmd == "add":
+        p = argparse.ArgumentParser(prog="dce add")
+        p.add_argument("name")
+        p.add_argument("channel_id")
+        a = p.parse_args(sub_argv)
+        # `add` can bootstrap channels.yaml from scratch
+        cfg = {}
+        if config_path.is_file():
+            cfg = yaml.safe_load(config_path.read_text()) or {}
+        return cmd_add(cfg, config_path, a.name, a.channel_id)
+
+    # Passthrough: every other command goes straight to DCE.Cli.
+    return cmd_passthrough(rest, token, dce)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
