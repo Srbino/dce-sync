@@ -38,7 +38,7 @@ except ImportError:
     sys.exit("dce: missing dependency. Install with: pip install pyyaml")
 
 
-KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover"}
+KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify"}
 
 DEFAULT_CONFIG = Path.cwd() / "channels.yaml"
 TOKEN_FILE = Path.home() / ".config" / "dce-sync" / "token"
@@ -347,6 +347,74 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
     return 1 if failed else 0
 
 
+def _verify_quick(path: Path) -> tuple[str, str | None]:
+    """Sniff the tail of the file to catch the most common breakage
+    (DCE crashed mid-write -> file truncated). Doesn't catch corruption
+    in the middle of the file."""
+    size = path.stat().st_size
+    if size == 0:
+        return "EMPTY", "0 bytes"
+    with open(path, "rb") as fh:
+        fh.seek(max(0, size - 512))
+        tail = fh.read(512).decode("utf-8", errors="replace").rstrip()
+    if not tail.endswith(("}", "]")):
+        return "TRUNCATED", f"tail ends: ...{tail[-50:]!r}"
+    return "OK", None
+
+
+def cmd_verify(cfg: dict, config_path: Path, quick: bool,
+               filter_re: str | None) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    if not output_dir.is_dir():
+        die(f"output_dir does not exist: {output_dir}")
+
+    files = sorted(output_dir.glob("*.json"))
+    if filter_re:
+        pat = re.compile(filter_re, re.I)
+        files = [f for f in files if pat.search(f.name)]
+
+    if not files:
+        print("no JSON files matched")
+        return 0
+
+    mode = "quick (tail sniff)" if quick else "full (json.load)"
+    print(f"output_dir: {output_dir}")
+    print(f"checking {len(files)} files, {mode}...\n", flush=True)
+
+    bad: list[tuple[str, str, str | None]] = []
+    for fp in files:
+        size = fp.stat().st_size
+        if quick:
+            status, detail = _verify_quick(fp)
+        else:
+            try:
+                with open(fp) as fh:
+                    data = json.load(fh)
+                if "messages" not in data:
+                    status, detail = "NO_MESSAGES", None
+                else:
+                    status, detail = "OK", f"{len(data['messages']):,} msgs"
+            except json.JSONDecodeError as e:
+                status, detail = "CORRUPT", str(e)[:100]
+            except OSError as e:
+                status, detail = "IO_ERROR", str(e)[:100]
+        if status != "OK":
+            bad.append((fp.name, status, detail))
+        line = f"  [{status:>10}]  {_human_size(size):>10}  {fp.name}"
+        if detail:
+            line += f"  ({detail})"
+        print(line, flush=True)
+
+    ok = len(files) - len(bad)
+    print(f"\n{ok}/{len(files)} OK", flush=True)
+    if bad:
+        print(f"{len(bad)} problem(s):", file=sys.stderr, flush=True)
+        for n, s, d in bad:
+            print(f"  {s}: {n}", file=sys.stderr, flush=True)
+        return 1
+    return 0
+
+
 def _files_for_channel(output_dir: Path, channel_id: str) -> list[Path]:
     if not output_dir.is_dir():
         return []
@@ -583,6 +651,7 @@ commands handled by dce:
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
   stats [--fast]                per-channel totals (files, msgs, size, date range)
+  verify [--quick] [--filter R] sanity-check every JSON in output_dir parses
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
 
@@ -652,6 +721,16 @@ def main(argv: list[str] | None = None) -> int:
         cfg = load_config(config_path) if config_path.is_file() else {}
         return cmd_discover(cfg, config_path, token, dce, a.guild,
                             a.filter_re, a.write, a.include_threads)
+
+    if cmd == "verify":
+        p = argparse.ArgumentParser(prog="dce verify")
+        p.add_argument("--quick", action="store_true",
+                       help="tail sniff only; skips full json.load")
+        p.add_argument("--filter", dest="filter_re", default=None,
+                       help="regex applied to filename")
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path)
+        return cmd_verify(cfg, config_path, a.quick, a.filter_re)
 
     if cmd == "stats":
         p = argparse.ArgumentParser(prog="dce stats")
