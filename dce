@@ -38,7 +38,7 @@ except ImportError:
     sys.exit("dce: missing dependency. Install with: pip install pyyaml")
 
 
-KNOWN_CMDS = {"list", "sync", "add", "token"}
+KNOWN_CMDS = {"list", "sync", "add", "token", "stats"}
 
 DEFAULT_CONFIG = Path.cwd() / "channels.yaml"
 TOKEN_FILE = Path.home() / ".config" / "dce-sync" / "token"
@@ -347,6 +347,93 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
     return 1 if failed else 0
 
 
+def _files_for_channel(output_dir: Path, channel_id: str) -> list[Path]:
+    if not output_dir.is_dir():
+        return []
+    return sorted(
+        f for f in output_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".json" and channel_id in f.name
+    )
+
+
+def _human_size(n: int) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024:
+            return f"{n:.1f} {unit}" if unit != "B" else f"{n} B"
+        n /= 1024  # type: ignore[assignment]
+    return f"{n:.1f} TB"
+
+
+def _scan_file_stats(path: Path) -> tuple[int, str | None, str | None]:
+    """Return (message_count, first_iso_date, last_iso_date). Loads the full
+    JSON because DCE writes messageCount only at the end of the file; a header
+    seek won't get us a reliable count for partial reads."""
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return (0, None, None)
+    msgs = data.get("messages") or []
+    if not msgs:
+        return (0, None, None)
+    first = (msgs[0].get("timestamp") or "")[:10] or None
+    last = (msgs[-1].get("timestamp") or "")[:10] or None
+    return (len(msgs), first, last)
+
+
+def cmd_stats(cfg: dict, config_path: Path, fast: bool) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    channels = cfg.get("channels") or {}
+    if not channels:
+        die("no channels registered. Use `dce add NAME CHANNEL_ID`.")
+
+    print(f"output_dir: {output_dir}", flush=True)
+    rows: list[tuple[str, int, int, int, str]] = []
+    total_files = total_msgs = total_bytes = 0
+
+    for name, ch in channels.items():
+        cid = str(ch["id"])
+        files = _files_for_channel(output_dir, cid)
+        if not files:
+            rows.append((name, 0, 0, 0, "(no exports)"))
+            continue
+
+        ch_bytes = sum(f.stat().st_size for f in files)
+        if fast:
+            rows.append((name, len(files), 0, ch_bytes, "(--fast: msgs/range skipped)"))
+            total_files += len(files)
+            total_bytes += ch_bytes
+            continue
+
+        print(f"  scanning {name} ({len(files)} files, {_human_size(ch_bytes)})...",
+              flush=True)
+        ch_msgs = 0
+        first: str | None = None
+        last: str | None = None
+        for fp in files:
+            n, fst, lst = _scan_file_stats(fp)
+            ch_msgs += n
+            if fst and (first is None or fst < first):
+                first = fst
+            if lst and (last is None or lst > last):
+                last = lst
+        date_range = f"{first} -> {last}" if first else "(empty)"
+        rows.append((name, len(files), ch_msgs, ch_bytes, date_range))
+        total_files += len(files)
+        total_msgs += ch_msgs
+        total_bytes += ch_bytes
+
+    w_n = max(len(r[0]) for r in rows + [("TOTAL", 0, 0, 0, "")])
+    print()
+    print(f"  {'channel':<{w_n}}  {'files':>5}  {'msgs':>9}  {'size':>10}  date range")
+    for n, fc, mc, b, dr in rows:
+        msg_s = f"{mc:>9,}" if mc else "        -"
+        print(f"  {n:<{w_n}}  {fc:>5}  {msg_s}  {_human_size(b):>10}  {dr}")
+    print(f"  {'TOTAL':<{w_n}}  {total_files:>5}  {total_msgs:>9,}  "
+          f"{_human_size(total_bytes):>10}")
+    return 0
+
+
 def cmd_add(cfg: dict, config_path: Path, name: str, channel_id: str) -> int:
     cfg.setdefault("channels", {})
     if name in cfg["channels"]:
@@ -397,6 +484,7 @@ commands handled by dce:
   sync [name ...]               incremental sync (default: all)
                                   flags: --dry-run, -j/--jobs N (parallel)
   add NAME CHANNEL_ID           add a channel to channels.yaml
+  stats [--fast]                per-channel totals (files, msgs, size, date range)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
 
@@ -452,6 +540,16 @@ def main(argv: list[str] | None = None) -> int:
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         return cmd_sync(cfg, config_path, token, dce, a.channels, a.dry_run, a.jobs)
+
+    if cmd == "stats":
+        p = argparse.ArgumentParser(prog="dce stats")
+        p.add_argument(
+            "--fast", action="store_true",
+            help="skip JSON parse: file count + bytes only (no msg/date)",
+        )
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path)
+        return cmd_stats(cfg, config_path, a.fast)
 
     if cmd == "add":
         p = argparse.ArgumentParser(prog="dce add")
