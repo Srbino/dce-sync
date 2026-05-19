@@ -11,9 +11,10 @@ Everything else is forwarded to `DiscordChatExporter.Cli` unchanged, so the full
 ## Install
 
 ```sh
-# 1. DiscordChatExporter.Cli (the real tool)
-dotnet tool install -g DiscordChatExporter.Cli
-# add ~/.dotnet/tools to your PATH if it isn't already
+# 1. DiscordChatExporter.Cli (the real tool) — get the latest release
+# from https://github.com/Tyrrrz/DiscordChatExporter/releases and unzip
+# the appropriate self-contained build for your platform somewhere on PATH
+# (e.g. ~/.local/share/dce-cli/, with a thin shim at ~/.local/bin/discordchatexporter).
 
 # 2. this wrapper
 pip install pyyaml
@@ -28,6 +29,8 @@ cd /path/to/where/you/want/exports
 cp /path/to/dce-sync/channels.example.yaml channels.yaml
 $EDITOR channels.yaml          # add your channel IDs
 
+dce token set YOUR_DISCORD_TOKEN   # see "Getting your Discord token" below
+
 dce list                       # see what's registered
 dce sync                       # incremental pull
 dce sync pvm                   # one channel
@@ -39,13 +42,20 @@ dce sync --dry-run             # preview without exporting
 In order, first hit wins:
 
 1. `$DCE_TOKEN` environment variable
-2. `--settings PATH` (point to your DCE `Settings.dat`)
-3. `~/Library/Application Support/DiscordChatExporter/Settings.dat` (macOS default)
-4. `~/.config/DiscordChatExporter/Settings.dat` (Linux default)
+2. `~/.config/dce-sync/token` (set once via `dce token set <TOKEN>`, stored with mode 0600)
+3. `./.dce_token` in the current directory (project-local override)
+4. DCE GUI `Settings.dat`, **only if it isn't encrypted** — current DCE versions store the token as `enc:...` and we can't decrypt that without the GUI's platform-specific key derivation, so this path is essentially a legacy fallback.
 
-If you've opened the DiscordChatExporter GUI once and signed in, the token is already in `Settings.dat` and `dce` will use it without further config.
+### Getting your Discord token
 
-> **Note** — some macOS installs of DCE keep `Settings.dat` *inside* the `.app` bundle (`DiscordChatExporter.app/Contents/MacOS/Settings.dat`) instead of `~/Library/Application Support`. If that's you, pass `--settings /path/to/that/Settings.dat`.
+`dce` does not extract tokens from the Discord client or browser. Use the same approach DCE.Cli documents (`discordchatexporter guide`):
+
+1. Open Discord in a browser, log in, press <kbd>F12</kbd> to open Dev Tools.
+2. In the **Network** tab, filter for `/api`.
+3. Click any request, look in the request headers for `Authorization: ...` — that string is your user token.
+4. `dce token set <THAT_STRING>` — wraps with the right env semantics; nothing else has to know about it.
+
+> **Account risk** — user tokens are not officially supported. Discord may rate-limit or suspend accounts that automate them. Use on accounts you own, accept the risk. `dce` defaults to DCE.Cli's polite rate-limit preset.
 
 ## How incremental sync works
 

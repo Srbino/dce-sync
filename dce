@@ -36,12 +36,13 @@ except ImportError:
     sys.exit("dce: missing dependency. Install with: pip install pyyaml")
 
 
-KNOWN_CMDS = {"list", "sync", "add"}
+KNOWN_CMDS = {"list", "sync", "add", "token"}
 
 DEFAULT_CONFIG = Path.cwd() / "channels.yaml"
+TOKEN_FILE = Path.home() / ".config" / "dce-sync" / "token"
 
-# Settings.dat candidates, checked in order. macOS DCE GUI sometimes stores
-# settings inside the .app bundle; the standard path is also tried.
+# Opportunistic fallback: read an unencrypted token from a DCE GUI Settings.dat.
+# Modern DCE versions encrypt this as `enc:...` and we skip those entries.
 DEFAULT_SETTINGS_PATHS = [
     Path.home() / "Library" / "Application Support" / "DiscordChatExporter" / "Settings.dat",
     Path.home() / ".config" / "DiscordChatExporter" / "Settings.dat",
@@ -66,15 +67,36 @@ def find_dce_binary() -> str:
     return ""  # unreachable
 
 
+def _read_token_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    try:
+        tok = path.read_text().strip()
+    except OSError:
+        return None
+    return tok or None
+
+
 def load_token(explicit_path: str | None) -> str:
+    # 1. env var (CI / one-off invocations)
     if os.environ.get("DCE_TOKEN"):
         return os.environ["DCE_TOKEN"]
 
+    # 2. our own persistent token (preferred), set via `dce token set`
+    tok = _read_token_file(TOKEN_FILE)
+    if tok:
+        return tok
+
+    # 3. project-local override
+    tok = _read_token_file(Path.cwd() / ".dce_token")
+    if tok:
+        return tok
+
+    # 4. opportunistic: unencrypted DCE GUI Settings.dat
     candidates: list[Path] = []
     if explicit_path:
         candidates.append(Path(explicit_path).expanduser())
     candidates.extend(DEFAULT_SETTINGS_PATHS)
-
     for p in candidates:
         if not p.is_file():
             continue
@@ -82,16 +104,57 @@ def load_token(explicit_path: str | None) -> str:
             data = json.loads(p.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        tok = data.get("LastToken")
-        if tok:
-            return tok
+        tok = data.get("LastToken", "")
+        if not tok or tok.startswith("enc:"):
+            # `enc:` = DCE GUI encrypted it; we cannot decrypt without the GUI's
+            # platform-specific key derivation. Fall through to error.
+            continue
+        return tok
 
     die(
         "no token found.\n"
-        "  options: set DCE_TOKEN env var, pass --settings PATH, "
-        "or run DiscordChatExporter GUI once so Settings.dat gets populated."
+        "  set one with:  dce token set <YOUR_DISCORD_TOKEN>\n"
+        "  or:            export DCE_TOKEN=<YOUR_DISCORD_TOKEN>\n"
+        "  (DCE GUI's Settings.dat is encrypted on this machine and cannot be "
+        "read directly.)"
     )
     return ""  # unreachable
+
+
+def cmd_token(rest: list[str]) -> int:
+    usage = "usage: dce token (set <token> | show | path | rm)"
+    if not rest or rest[0] in ("-h", "--help"):
+        print(usage)
+        return 0
+    action = rest[0]
+    if action == "set":
+        if len(rest) != 2 or not rest[1]:
+            die(usage)
+        TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_FILE.write_text(rest[1])
+        TOKEN_FILE.chmod(0o600)
+        print(f"wrote token to {TOKEN_FILE} (mode 0600)")
+        return 0
+    if action == "show":
+        tok = _read_token_file(TOKEN_FILE)
+        if not tok:
+            print(f"no token at {TOKEN_FILE}")
+            return 1
+        masked = f"{tok[:4]}...{tok[-4:]}" if len(tok) > 12 else "***"
+        print(f"{TOKEN_FILE}: {masked} (len={len(tok)})")
+        return 0
+    if action == "path":
+        print(TOKEN_FILE)
+        return 0
+    if action == "rm":
+        if TOKEN_FILE.is_file():
+            TOKEN_FILE.unlink()
+            print(f"removed {TOKEN_FILE}")
+        else:
+            print(f"no token at {TOKEN_FILE}")
+        return 0
+    die(f"unknown token subcommand: {action}\n{usage}")
+    return 1  # unreachable
 
 
 def load_config(path: Path) -> dict:
@@ -256,6 +319,8 @@ commands handled by dce:
   list                          show registered channels and last export date
   sync [name ...]               incremental sync (default: all). --dry-run supported.
   add NAME CHANNEL_ID           add a channel to channels.yaml
+  token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
+  token show | path | rm        inspect / locate / remove the saved token
 
 anything else is forwarded to DiscordChatExporter.Cli with --token auto-injected:
   dce guilds
@@ -263,11 +328,11 @@ anything else is forwarded to DiscordChatExporter.Cli with --token auto-injected
   dce export -c CHANNEL_ID --after 2026-05-01
   dce exportguild -g GUILD_ID -f Json -o ./exports/
 
-token lookup order:
+token lookup order (first hit wins):
   1. $DCE_TOKEN
-  2. --settings PATH  (Settings.dat from DiscordChatExporter GUI)
-  3. ~/Library/Application Support/DiscordChatExporter/Settings.dat   (macOS default)
-  4. ~/.config/DiscordChatExporter/Settings.dat                       (Linux default)
+  2. ~/.config/dce-sync/token   (set via `dce token set`)
+  3. ./.dce_token               (project-local override)
+  4. DCE GUI Settings.dat       (only if unencrypted — modern versions store `enc:...`)
 """
 
 
@@ -286,7 +351,11 @@ def main(argv: list[str] | None = None) -> int:
     cmd = rest[0]
     sub_argv = rest[1:]
 
-    # Token + binary are needed for every operation except --help, which we've handled.
+    # `token` is self-contained — no DCE.Cli or token-loading needed.
+    if cmd == "token":
+        return cmd_token(sub_argv)
+
+    # Everything else needs both the binary and the resolved token.
     token = load_token(settings_path)
     dce = find_dce_binary()
 
