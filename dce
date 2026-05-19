@@ -29,7 +29,7 @@ import shutil
 import subprocess
 import sys
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 try:
@@ -223,6 +223,24 @@ def cmd_list(cfg: dict, config_path: Path) -> int:
     return 0
 
 
+_SINCE_RX = re.compile(r"^(\d+)\s*([dwmy])$", re.I)
+_SINCE_UNIT_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
+
+
+def parse_since(spec: str) -> date:
+    """Parse `7d` / `3w` / `2m` / `1y` and return the date that many units ago.
+    Months and years are approximated (30d, 365d) — Discord cares about
+    UTC midnight precision, not calendar boundaries."""
+    m = _SINCE_RX.match(spec.strip())
+    if not m:
+        die(f"--since: expected like 7d, 3w, 2m, 1y (got {spec!r})")
+    n = int(m.group(1))
+    if n < 1:
+        die("--since: value must be >= 1")
+    unit = m.group(2).lower()
+    return date.today() - timedelta(days=n * _SINCE_UNIT_DAYS[unit])
+
+
 def _build_export_cmd(dce: str, token: str, cid: str, output_dir: Path,
                       last: date | None) -> list[str]:
     cmd = [
@@ -265,7 +283,8 @@ def _run_export(name: str, cmd: list[str], token: str, print_lock: threading.Loc
 
 
 def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
-             targets: list[str], dry_run: bool, jobs: int) -> int:
+             targets: list[str], dry_run: bool, jobs: int,
+             since: date | None) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -293,7 +312,10 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
             failed.append(name)
             continue
         cid = str(channels[name]["id"])
-        last = parse_last_after(output_dir, cid)
+        if since is not None:
+            last = since
+        else:
+            last = parse_last_after(output_dir, cid)
         if last and last >= today:
             print(f"  {name}: up to date (last_after={last})", flush=True)
             continue
@@ -764,7 +786,8 @@ usage:
 commands handled by dce:
   list                          show registered channels and last export date
   sync [name ...]               incremental sync (default: all)
-                                  flags: --dry-run, -j/--jobs N (parallel)
+                                  flags: --dry-run, -j/--jobs N (parallel),
+                                         --since 7d|3w|2m|1y (override last_after)
   add NAME CHANNEL_ID           add a channel to channels.yaml
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
@@ -824,9 +847,15 @@ def main(argv: list[str] | None = None) -> int:
             "-j", "--jobs", type=int, default=1,
             help="parallel channel downloads (default: 1)",
         )
+        p.add_argument(
+            "--since", default=None,
+            help="override file-based last_after with NOW-X (e.g. 7d, 3w, 2m, 1y)",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
-        return cmd_sync(cfg, config_path, token, dce, a.channels, a.dry_run, a.jobs)
+        since = parse_since(a.since) if a.since else None
+        return cmd_sync(cfg, config_path, token, dce, a.channels,
+                        a.dry_run, a.jobs, since)
 
     if cmd == "discover":
         p = argparse.ArgumentParser(prog="dce discover")
