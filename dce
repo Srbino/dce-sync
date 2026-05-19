@@ -21,12 +21,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
@@ -221,8 +223,49 @@ def cmd_list(cfg: dict, config_path: Path) -> int:
     return 0
 
 
+def _build_export_cmd(dce: str, token: str, cid: str, output_dir: Path,
+                      last: date | None) -> list[str]:
+    cmd = [
+        dce, "export",
+        "-t", token,
+        "-c", cid,
+        "-f", "Json",
+        "-o", str(output_dir) + os.sep,
+    ]
+    if last:
+        cmd += ["--after", last.isoformat()]
+    return cmd
+
+
+def _run_export(name: str, cmd: list[str], token: str, print_lock: threading.Lock,
+                prefix_lines: bool) -> int:
+    """Run a single export. When `prefix_lines` is True, capture stdout/stderr
+    and write each line prefixed with the channel name (used for parallel
+    runs). Otherwise stream straight to the terminal so DCE.Cli's progress
+    indicator stays interactive."""
+    if not prefix_lines:
+        return subprocess.call(cmd)
+
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for raw in proc.stdout:
+        line = raw.rstrip()
+        if not line:
+            continue
+        with print_lock:
+            print(f"  [{name}] {line}", flush=True)
+    proc.wait()
+    return proc.returncode
+
+
 def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
-             targets: list[str], dry_run: bool) -> int:
+             targets: list[str], dry_run: bool, jobs: int) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -230,42 +273,76 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
     if not channels:
         die("no channels registered. Use `dce add NAME CHANNEL_ID`.")
 
+    if jobs < 1:
+        die("--jobs must be >= 1")
+    if jobs > 6:
+        print(
+            f"  warning: --jobs={jobs} is aggressive for a single Discord "
+            f"token; you may see 429s. DCE.Cli backs off automatically.",
+            file=sys.stderr,
+        )
+
     requested = targets or list(channels.keys())
     today = date.today()
     failed: list[str] = []
+    queue: list[tuple[str, list[str], date | None]] = []
 
     for name in requested:
         if name not in channels:
-            print(f"  {name}: unknown (try `dce list`)", file=sys.stderr)
+            print(f"  {name}: unknown (try `dce list`)", file=sys.stderr, flush=True)
             failed.append(name)
             continue
         cid = str(channels[name]["id"])
         last = parse_last_after(output_dir, cid)
-
         if last and last >= today:
-            print(f"  {name}: up to date (last_after={last})")
+            print(f"  {name}: up to date (last_after={last})", flush=True)
             continue
-
-        cmd = [
-            dce, "export",
-            "-t", token,
-            "-c", cid,
-            "-f", "Json",
-            "-o", str(output_dir) + os.sep,
-        ]
-        if last:
-            cmd += ["--after", last.isoformat()]
+        cmd = _build_export_cmd(dce, token, cid, output_dir, last)
 
         if dry_run:
             redacted = ["<TOKEN>" if c == token else c for c in cmd]
-            print(f"  {name}: {' '.join(redacted)}")
+            print(f"  {name}: {' '.join(redacted)}", flush=True)
             continue
+        queue.append((name, cmd, last))
 
-        print(f"  {name}: exporting (after={last or 'beginning'})...")
-        rc = subprocess.call(cmd)
-        if rc != 0:
-            print(f"  {name}: FAILED (exit {rc})", file=sys.stderr)
-            failed.append(name)
+    if not queue:
+        return 1 if failed else 0
+
+    print_lock = threading.Lock()
+    prefix = jobs > 1
+
+    if jobs == 1:
+        for name, cmd, last in queue:
+            print(f"  {name}: exporting (after={last or 'beginning'})...", flush=True)
+            rc = _run_export(name, cmd, token, print_lock, prefix_lines=False)
+            if rc != 0:
+                print(f"  {name}: FAILED (exit {rc})", file=sys.stderr, flush=True)
+                failed.append(name)
+        return 1 if failed else 0
+
+    # Parallel path: announce all jobs up front, then dispatch.
+    for name, _, last in queue:
+        print(f"  {name}: queued (after={last or 'beginning'})", flush=True)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
+        futures = {
+            ex.submit(_run_export, name, cmd, token, print_lock, prefix): name
+            for name, cmd, _ in queue
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            name = futures[fut]
+            try:
+                rc = fut.result()
+            except Exception as e:  # pragma: no cover
+                print(f"  [{name}] EXCEPTION: {e}", file=sys.stderr)
+                failed.append(name)
+                continue
+            with print_lock:
+                if rc == 0:
+                    print(f"  [{name}] done", flush=True)
+                else:
+                    print(f"  [{name}] FAILED (exit {rc})", file=sys.stderr, flush=True)
+                    failed.append(name)
 
     return 1 if failed else 0
 
@@ -317,7 +394,8 @@ usage:
 
 commands handled by dce:
   list                          show registered channels and last export date
-  sync [name ...]               incremental sync (default: all). --dry-run supported.
+  sync [name ...]               incremental sync (default: all)
+                                  flags: --dry-run, -j/--jobs N (parallel)
   add NAME CHANNEL_ID           add a channel to channels.yaml
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
@@ -367,9 +445,13 @@ def main(argv: list[str] | None = None) -> int:
         p = argparse.ArgumentParser(prog="dce sync")
         p.add_argument("channels", nargs="*")
         p.add_argument("--dry-run", action="store_true")
+        p.add_argument(
+            "-j", "--jobs", type=int, default=1,
+            help="parallel channel downloads (default: 1)",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
-        return cmd_sync(cfg, config_path, token, dce, a.channels, a.dry_run)
+        return cmd_sync(cfg, config_path, token, dce, a.channels, a.dry_run, a.jobs)
 
     if cmd == "add":
         p = argparse.ArgumentParser(prog="dce add")
