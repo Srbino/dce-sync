@@ -38,7 +38,7 @@ except ImportError:
     sys.exit("dce: missing dependency. Install with: pip install pyyaml")
 
 
-KNOWN_CMDS = {"list", "sync", "add", "token", "stats"}
+KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover"}
 
 DEFAULT_CONFIG = Path.cwd() / "channels.yaml"
 TOKEN_FILE = Path.home() / ".config" / "dce-sync" / "token"
@@ -446,8 +446,104 @@ def cmd_add(cfg: dict, config_path: Path, name: str, channel_id: str) -> int:
 
 def cmd_passthrough(args: list[str], token: str, dce: str) -> int:
     if "-t" not in args and "--token" not in args:
-        args = ["-t", token] + args
+        # DCE.Cli expects `<subcommand> -t TOKEN`, not `-t TOKEN <subcommand>`.
+        # Insert just after the first positional so flags land on the command.
+        args = [args[0], "-t", token] + args[1:] if args else ["-t", token]
     return subprocess.call([dce] + args)
+
+
+def _dce_channels_output(dce: str, token: str, guild_id: str,
+                         include_threads: str) -> str:
+    """Run `discordchatexporter channels` and return stdout. Caller decides
+    how to parse — DCE.Cli prefers visual layout over a stable schema, so we
+    treat the output as best-effort text and rely on the channel-ID column."""
+    cmd = [dce, "channels", "-g", guild_id, "-t", token,
+           "--include-threads", include_threads]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        die(f"DCE.Cli channels failed (exit {r.returncode}): "
+            f"{(r.stderr or r.stdout).strip()[:300]}")
+    return r.stdout
+
+
+def _slugify(name: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9]+", "-", name.strip()).strip("-").lower()
+    return s or "channel"
+
+
+def cmd_discover(cfg: dict, config_path: Path, token: str, dce: str,
+                 guild_id: str, filter_re: str | None, write: bool,
+                 include_threads: str) -> int:
+    out = _dce_channels_output(dce, token, guild_id, include_threads)
+
+    # DCE.Cli prints one channel per line; columns vary by version but the
+    # 17-20 digit snowflake ID is always there. Take the longest text on the
+    # line after the ID as the channel name (categories tend to be shorter
+    # and come before the name when present).
+    id_rx = re.compile(r"\b(\d{17,20})\b")
+    discovered: list[tuple[str, str, str]] = []  # (slug, cid, raw_name)
+    for line in out.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = id_rx.search(line)
+        if not m:
+            continue
+        cid = m.group(1)
+        # Strip the id and split on `|`, `│`, or 2+ whitespace; pick the
+        # rightmost non-empty token as the channel name.
+        rest = (line[:m.start()] + line[m.end():]).strip()
+        parts = [p.strip() for p in re.split(r"[|│]|\s{2,}", rest) if p.strip()]
+        name = parts[-1] if parts else cid
+        discovered.append((_slugify(name), cid, name))
+
+    if not discovered:
+        print("no channels parsed from DCE.Cli output", file=sys.stderr)
+        return 1
+
+    pat = re.compile(filter_re, re.I) if filter_re else None
+    existing_ids = {str(c["id"]) for c in (cfg.get("channels") or {}).values()}
+    existing_slugs = set(cfg.get("channels") or {})
+
+    rows: list[tuple[str, str, str, str]] = []  # (status, slug, cid, raw)
+    for slug, cid, raw in discovered:
+        if pat and not pat.search(raw):
+            continue
+        if cid in existing_ids:
+            status = "existing"
+        else:
+            base = slug
+            i = 2
+            while slug in existing_slugs:
+                slug = f"{base}-{i}"
+                i += 1
+            existing_slugs.add(slug)
+            status = "new"
+        rows.append((status, slug, cid, raw))
+
+    if not rows:
+        print("filter matched no channels", file=sys.stderr)
+        return 1
+
+    w_s = max(len(r[1]) for r in rows)
+    for st, slug, cid, raw in rows:
+        print(f"  [{st:>8}]  {slug:<{w_s}}  {cid}  # {raw}")
+
+    new_rows = [r for r in rows if r[0] == "new"]
+    if not write:
+        print(f"\n{len(new_rows)} new, {len(rows) - len(new_rows)} existing. "
+              f"Re-run with --write to append.")
+        return 0
+
+    if not new_rows:
+        print("\nnothing new to write")
+        return 0
+    cfg.setdefault("channels", {})
+    for _, slug, cid, _ in new_rows:
+        cfg["channels"][slug] = {"id": cid}
+    save_config(config_path, cfg)
+    print(f"\nappended {len(new_rows)} channel(s) to {config_path}")
+    return 0
 
 
 def split_our_flags(argv: list[str]) -> tuple[Path, str | None, list[str]]:
@@ -484,6 +580,8 @@ commands handled by dce:
   sync [name ...]               incremental sync (default: all)
                                   flags: --dry-run, -j/--jobs N (parallel)
   add NAME CHANNEL_ID           add a channel to channels.yaml
+  discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
+                                  flags: --filter REGEX, --write, --include-threads None|Active|All
   stats [--fast]                per-channel totals (files, msgs, size, date range)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
@@ -540,6 +638,20 @@ def main(argv: list[str] | None = None) -> int:
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         return cmd_sync(cfg, config_path, token, dce, a.channels, a.dry_run, a.jobs)
+
+    if cmd == "discover":
+        p = argparse.ArgumentParser(prog="dce discover")
+        p.add_argument("--guild", required=True, help="Discord guild (server) ID")
+        p.add_argument("--filter", dest="filter_re", default=None,
+                       help="regex applied to channel name")
+        p.add_argument("--write", action="store_true",
+                       help="append new channels to channels.yaml")
+        p.add_argument("--include-threads", default="None",
+                       choices=("None", "Active", "All"))
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path) if config_path.is_file() else {}
+        return cmd_discover(cfg, config_path, token, dce, a.guild,
+                            a.filter_re, a.write, a.include_threads)
 
     if cmd == "stats":
         p = argparse.ArgumentParser(prog="dce stats")
