@@ -47,7 +47,7 @@ except ImportError:
 
 KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify",
               "merge", "upgrade-check", "completion", "search", "export-csv",
-              "snapshot"}
+              "snapshot", "status"}
 
 _DCE_GH_API = "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/latest"
 
@@ -1365,6 +1365,124 @@ def _parse_version(s: str) -> tuple[int, ...]:
     return tuple(out) or (0,)
 
 
+def _installed_dce_version(dce: str) -> str | None:
+    try:
+        r = subprocess.run([dce, "--version"], capture_output=True,
+                           text=True, timeout=10)
+        line = (r.stdout or r.stderr).strip().splitlines()
+        return line[0].lstrip("v").strip() if line else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _latest_dce_version() -> str | None:
+    req = urllib.request.Request(_DCE_GH_API,
+                                 headers={"Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.load(resp)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return None
+    return (data.get("tag_name") or "").lstrip("v") or None
+
+
+def cmd_status(cfg: dict, config_path: Path, dce: str,
+               as_json: bool, check_updates: bool, run_verify: bool) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    channels_cfg = cfg.get("channels") or {}
+
+    # Token: only the file's mtime, no decryption.
+    if TOKEN_FILE.is_file():
+        mtime = TOKEN_FILE.stat().st_mtime
+        saved = datetime.fromtimestamp(mtime)
+        token_info: dict | None = {
+            "path": str(TOKEN_FILE),
+            "saved": saved.isoformat(timespec="seconds"),
+            "age_days": (datetime.now() - saved).days,
+        }
+    else:
+        token_info = None
+
+    # Registry / sync coverage.
+    synced = stale = 0
+    for name, ch in channels_cfg.items():
+        if parse_last_after(output_dir, str(ch["id"])):
+            synced += 1
+        else:
+            stale += 1
+
+    # Archive footprint via filesystem walk (no JSON parse).
+    files = sorted(output_dir.glob("*.json")) if output_dir.is_dir() else []
+    archive_bytes = sum(f.stat().st_size for f in files)
+
+    dce_installed = _installed_dce_version(dce)
+    dce_latest: str | None = None
+    dce_outdated: bool | None = None
+    if check_updates and dce_installed:
+        dce_latest = _latest_dce_version()
+        if dce_latest:
+            dce_outdated = _parse_version(dce_installed) < _parse_version(dce_latest)
+
+    verify_result: dict | None = None
+    if run_verify and files:
+        bad = 0
+        for fp in files:
+            status, _ = _verify_quick(fp)
+            if status != "OK":
+                bad += 1
+        verify_result = {
+            "mode": "quick", "total": len(files), "ok": len(files) - bad,
+            "failed_count": bad,
+        }
+
+    payload = {
+        "output_dir": str(output_dir),
+        "token": token_info,
+        "channels": {
+            "registered": len(channels_cfg),
+            "synced": synced,
+            "stale": stale,
+        },
+        "archive": {"files": len(files), "bytes": archive_bytes},
+        "dce_cli": {
+            "version": dce_installed,
+            "latest": dce_latest,
+            "outdated": dce_outdated,
+        },
+        "verify": verify_result,
+    }
+
+    if as_json:
+        json.dump(payload, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 1 if (dce_outdated or (verify_result and verify_result["failed_count"])) else 0
+
+    print(f"output_dir: {output_dir}")
+    if token_info:
+        print(f"  token:    saved {token_info['saved'][:10]} "
+              f"({token_info['age_days']}d ago)")
+    else:
+        print(f"  token:    (none — set via `dce token set`)")
+    print(f"  channels: {len(channels_cfg)} registered, "
+          f"{synced} synced, {stale} stale")
+    print(f"  archive:  {len(files)} files, {_human_size(archive_bytes)}")
+    if dce_installed:
+        suffix = ""
+        if dce_latest:
+            suffix = (f"  (latest v{dce_latest}, "
+                      f"{'OUTDATED' if dce_outdated else 'up to date'})")
+        elif check_updates:
+            suffix = "  (latest check failed)"
+        print(f"  DCE.Cli:  v{dce_installed}{suffix}")
+    else:
+        print(f"  DCE.Cli:  (not found on PATH)")
+    if verify_result:
+        v = verify_result
+        flag = "" if v["failed_count"] == 0 else f" ({v['failed_count']} bad)"
+        print(f"  verify:   {v['ok']}/{v['total']} OK{flag}")
+    return 1 if (dce_outdated or (verify_result and verify_result["failed_count"])) else 0
+
+
 def cmd_upgrade_check(dce: str) -> int:
     try:
         r = subprocess.run([dce, "--version"], capture_output=True,
@@ -1585,6 +1703,9 @@ commands handled by dce:
   token age [--max-days N]      report how long ago the token was saved
                                 (exits 1 if older than --max-days)
   upgrade-check                 compare installed DCE.Cli vs latest GitHub release
+  status [--json] [--check-updates] [--verify]
+                                composite health snapshot (token age, channel
+                                counts, archive size, DCE.Cli version)
   completion (zsh|bash)         print shell completion script to stdout
 
 anything else is forwarded to DiscordChatExporter.Cli with --token auto-injected:
@@ -1623,6 +1744,19 @@ def main(argv: list[str] | None = None) -> int:
     # `upgrade-check` needs the DCE binary path but no Discord token.
     if cmd == "upgrade-check":
         return cmd_upgrade_check(find_dce_binary())
+
+    # `status` aggregates filesystem / registry info; no Discord token needed.
+    if cmd == "status":
+        p = argparse.ArgumentParser(prog="dce status")
+        p.add_argument("--json", action="store_true", dest="as_json")
+        p.add_argument("--check-updates", action="store_true",
+                       help="hit GitHub to compare DCE.Cli vs latest release")
+        p.add_argument("--verify", action="store_true",
+                       help="also run a --quick verify pass")
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path) if config_path.is_file() else {}
+        return cmd_status(cfg, config_path, find_dce_binary(),
+                          a.as_json, a.check_updates, a.verify)
 
     # `completion` is fully self-contained — emits a static script to stdout.
     if cmd == "completion":
