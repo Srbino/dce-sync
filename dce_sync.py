@@ -263,19 +263,19 @@ def _build_export_cmd(dce: str, token: str, cid: str, output_dir: Path,
     return cmd
 
 
-def _run_export(name: str, cmd: list[str], token: str, print_lock: threading.Lock,
-                prefix_lines: bool, quiet: bool = False) -> int:
-    """Run a single export. When `prefix_lines` is True, capture stdout/stderr
-    and write each line prefixed with the channel name (used for parallel
-    runs). Otherwise stream straight to the terminal so DCE.Cli's progress
-    indicator stays interactive. In `quiet` mode we discard subprocess output
-    entirely so a cron-driven sync stays silent on success."""
+def _run_export_once(name: str, cmd: list[str], token: str,
+                     print_lock: threading.Lock,
+                     prefix_lines: bool, quiet: bool) -> int:
     if quiet:
         return subprocess.call(cmd, stdout=subprocess.DEVNULL,
                                stderr=subprocess.DEVNULL)
     if not prefix_lines:
         return subprocess.call(cmd)
+    return _run_export_prefixed(name, cmd, print_lock)
 
+
+def _run_export_prefixed(name: str, cmd: list[str],
+                         print_lock: threading.Lock) -> int:
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -292,6 +292,27 @@ def _run_export(name: str, cmd: list[str], token: str, print_lock: threading.Loc
             print(f"  [{name}] {line}", flush=True)
     proc.wait()
     return proc.returncode
+
+
+def _run_export(name: str, cmd: list[str], token: str,
+                print_lock: threading.Lock, prefix_lines: bool,
+                quiet: bool = False, retries: int = 0,
+                max_backoff: float = 60.0) -> int:
+    """Run a single export, retrying transient failures with exponential
+    backoff. DCE.Cli handles HTTP 429 itself, so this is mostly for catching
+    subprocess crashes, network drops, and the occasional dotnet hiccup that
+    would otherwise abort a long parallel run."""
+    attempt = 0
+    while True:
+        rc = _run_export_once(name, cmd, token, print_lock, prefix_lines, quiet)
+        if rc == 0 or attempt >= retries:
+            return rc
+        attempt += 1
+        backoff = min(2.0 ** attempt, max_backoff)
+        with print_lock:
+            print(f"  [{name}] exit {rc}; retry {attempt}/{retries} in "
+                  f"{backoff:.0f}s", file=sys.stderr, flush=True)
+        time.sleep(backoff)
 
 
 class _ProgressTracker:
@@ -375,7 +396,8 @@ class _ProgressTracker:
 
 def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
              targets: list[str], dry_run: bool, jobs: int,
-             since: date | None, watch: float, quiet: bool) -> int:
+             since: date | None, watch: float, quiet: bool,
+             retries: int) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,7 +454,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
                 print(f"  {name}: exporting (after={last or 'beginning'})...",
                       flush=True)
             rc = _run_export(name, cmd, token, print_lock,
-                             prefix_lines=False, quiet=quiet)
+                             prefix_lines=False, quiet=quiet, retries=retries)
             if rc != 0:
                 print(f"  {name}: FAILED (exit {rc})", file=sys.stderr, flush=True)
                 failed.append(name)
@@ -461,7 +483,8 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
         if tracker:
             tracker.mark_start(name)
         try:
-            return _run_export(name, cmd, token, print_lock, prefix, quiet=quiet)
+            return _run_export(name, cmd, token, print_lock, prefix,
+                               quiet=quiet, retries=retries)
         finally:
             if tracker:
                 tracker.mark_done(name)
@@ -1307,7 +1330,8 @@ commands handled by dce:
                                   flags: --dry-run, -j/--jobs N (parallel),
                                          --since 7d|3w|2m|1y (override last_after),
                                          --watch [SECONDS] (size/delta snapshots),
-                                         -q/--quiet (cron-friendly; DCE_QUIET=1 env)
+                                         -q/--quiet (cron-friendly; DCE_QUIET=1 env),
+                                         --retries N (exponential backoff)
   add NAME CHANNEL_ID           add a channel to channels.yaml
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
@@ -1399,12 +1423,19 @@ def main(argv: list[str] | None = None) -> int:
             help="suppress per-channel chatter; print only failures and "
                  "a final `synced N, failed M` summary (also via DCE_QUIET=1)",
         )
+        p.add_argument(
+            "--retries", type=int, default=0,
+            help="retry transient subprocess failures with exponential "
+                 "backoff (default: 0 = no retries)",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         since = parse_since(a.since) if a.since else None
         quiet = a.quiet or bool(os.environ.get("DCE_QUIET"))
+        if a.retries < 0:
+            die("--retries must be >= 0")
         return cmd_sync(cfg, config_path, token, dce, a.channels,
-                        a.dry_run, a.jobs, since, a.watch, quiet)
+                        a.dry_run, a.jobs, since, a.watch, quiet, a.retries)
 
     if cmd == "discover":
         p = argparse.ArgumentParser(prog="dce discover")
