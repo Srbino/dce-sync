@@ -1,0 +1,73 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install (editable, with deps)
+        run: pip install -e .
+
+      - name: Syntax — dce_sync.py parses
+        run: python -c "import ast; ast.parse(open('dce_sync.py').read())"
+
+      - name: Import — module loads cleanly
+        run: python -c "import dce_sync; assert callable(dce_sync.main)"
+
+      - name: Entry point — `dce --help` runs and lists subcommands
+        run: |
+          dce --help > /tmp/help.txt
+          for cmd in list sync add discover verify stats merge token \
+                     upgrade-check completion search export-csv snapshot; do
+            grep -q -- "$cmd" /tmp/help.txt || (
+              echo "missing $cmd in --help" && cat /tmp/help.txt && exit 1
+            )
+          done
+
+      - name: Completion — bash script is valid
+        run: dce completion bash | bash -n -
+
+      - name: Completion — zsh script is valid
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -qq zsh
+          dce completion zsh | zsh -n -
+
+      - name: Token mgmt — set / show / age / rm round-trip
+        run: |
+          dce token set "test-token-1234567890"
+          dce token show | grep -q "len=18"
+          dce token path | grep -q "dce-sync/token"
+          dce token age | grep -q "age:"
+          dce token rm
+          dce token show && exit 1 || true
+
+      - name: Parsers — bad --since / --until are rejected cleanly
+        run: |
+          # Minimal config so cmd_sync gets past load_config and into the parsers.
+          printf 'output_dir: .\nchannels: {}\n' > /tmp/c.yaml
+          dce --config /tmp/c.yaml sync --dry-run --since 3z      2>&1 | grep -q "expected like 7d"
+          dce --config /tmp/c.yaml sync --dry-run --until bad-fmt 2>&1 | grep -q "expected YYYY-MM-DD"
+
+      - name: Build — sdist + wheel succeed
+        run: |
+          pip install --quiet build
+          python -m build --outdir /tmp/dist
+          ls /tmp/dist | grep -q "dce_sync-.*\.tar\.gz"
+          ls /tmp/dist | grep -q "dce_sync-.*\.whl"
