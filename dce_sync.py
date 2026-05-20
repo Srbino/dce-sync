@@ -252,8 +252,16 @@ def parse_since(spec: str) -> date:
     return date.today() - timedelta(days=n * _SINCE_UNIT_DAYS[unit])
 
 
+def parse_until(spec: str) -> date:
+    """Absolute upper bound for the export window. Use --since for a span."""
+    try:
+        return datetime.strptime(spec.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        die(f"--until: expected YYYY-MM-DD (got {spec!r})")
+
+
 def _build_export_cmd(dce: str, token: str, cid: str, output_dir: Path,
-                      last: date | None) -> list[str]:
+                      last: date | None, until: date | None = None) -> list[str]:
     cmd = [
         dce, "export",
         "-t", token,
@@ -263,6 +271,8 @@ def _build_export_cmd(dce: str, token: str, cid: str, output_dir: Path,
     ]
     if last:
         cmd += ["--after", last.isoformat()]
+    if until:
+        cmd += ["--before", until.isoformat()]
     return cmd
 
 
@@ -400,7 +410,7 @@ class _ProgressTracker:
 def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
              targets: list[str], dry_run: bool, jobs: int,
              since: date | None, watch: float, quiet: bool,
-             retries: int) -> int:
+             retries: int, until: date | None) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -432,11 +442,16 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
             last = since
         else:
             last = parse_last_after(output_dir, cid)
-        if last and last >= today:
+        if last and last >= today and until is None:
             if not quiet:
                 print(f"  {name}: up to date (last_after={last})", flush=True)
             continue
-        cmd = _build_export_cmd(dce, token, cid, output_dir, last)
+        if until is not None and last is not None and last >= until:
+            if not quiet:
+                print(f"  {name}: already covers --until ({last} >= {until})",
+                      flush=True)
+            continue
+        cmd = _build_export_cmd(dce, token, cid, output_dir, last, until)
 
         if dry_run:
             redacted = ["<TOKEN>" if c == token else c for c in cmd]
@@ -1451,6 +1466,7 @@ commands handled by dce:
   sync [name ...]               incremental sync (default: all)
                                   flags: --dry-run, -j/--jobs N (parallel),
                                          --since 7d|3w|2m|1y (override last_after),
+                                         --until YYYY-MM-DD (upper bound),
                                          --watch [SECONDS] (size/delta snapshots),
                                          -q/--quiet (cron-friendly; DCE_QUIET=1 env),
                                          --retries N (exponential backoff)
@@ -1552,14 +1568,23 @@ def main(argv: list[str] | None = None) -> int:
             help="retry transient subprocess failures with exponential "
                  "backoff (default: 0 = no retries)",
         )
+        p.add_argument(
+            "--until", default=None, metavar="YYYY-MM-DD",
+            help="upper bound: stop fetching at this date (passes "
+                 "--before to DCE.Cli)",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         since = parse_since(a.since) if a.since else None
+        until = parse_until(a.until) if a.until else None
         quiet = a.quiet or bool(os.environ.get("DCE_QUIET"))
         if a.retries < 0:
             die("--retries must be >= 0")
+        if since and until and since >= until:
+            die(f"--since resolves to {since}, which is >= --until {until}")
         return cmd_sync(cfg, config_path, token, dce, a.channels,
-                        a.dry_run, a.jobs, since, a.watch, quiet, a.retries)
+                        a.dry_run, a.jobs, since, a.watch, quiet, a.retries,
+                        until)
 
     if cmd == "discover":
         p = argparse.ArgumentParser(prog="dce discover")
