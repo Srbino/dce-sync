@@ -67,5 +67,5 @@ Initial tagged release. Wraps [DiscordChatExporter.Cli](https://github.com/Tyrrr
 - Full README rewrite covering the command reference table, the sync flag block, end-to-end examples (parallel sync with retries, cron-style quiet runs, search, export-csv, merge, snapshot), and a working macOS arm64 install snippet that matches the documented `~/.local/share/dce-cli/` + shim layout.
 - `channels.example.yaml` shipped as a bootstrap template.
 
-[Unreleased]: https://github.com/srba/dce-sync/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/srba/dce-sync/releases/tag/v0.1.0
+[Unreleased]: https://github.com/Srbino/dce-sync/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Srbino/dce-sync/releases/tag/v0.1.0

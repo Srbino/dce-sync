@@ -1,6 +1,6 @@
 # dce
 
-[![test](https://github.com/srba/dce-sync/actions/workflows/test.yml/badge.svg)](https://github.com/srba/dce-sync/actions/workflows/test.yml)
+[![test](https://github.com/Srbino/dce-sync/actions/workflows/test.yml/badge.svg)](https://github.com/Srbino/dce-sync/actions/workflows/test.yml)
 
 A thin wrapper around [DiscordChatExporter.Cli](https://github.com/Tyrrrz/DiscordChatExporter) that adds the bits the underlying CLI doesn't ship:
 
