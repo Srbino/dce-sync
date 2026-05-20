@@ -26,10 +26,13 @@ import json
 import os
 import re
 import shutil
+import platform
 import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -39,7 +42,10 @@ except ImportError:
     sys.exit("dce: missing dependency. Install with: pip install pyyaml")
 
 
-KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify", "merge"}
+KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify",
+              "merge", "upgrade-check"}
+
+_DCE_GH_API = "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/latest"
 
 DEFAULT_CONFIG = Path.cwd() / "channels.yaml"
 TOKEN_FILE = Path.home() / ".config" / "dce-sync" / "token"
@@ -753,6 +759,95 @@ def cmd_add(cfg: dict, config_path: Path, name: str, channel_id: str) -> int:
     return 0
 
 
+def _platform_asset_substring() -> str | None:
+    """Substring used in DCE.Cli release asset filenames for the current host
+    (e.g. `osx-arm64`). Returns None for unsupported platforms."""
+    sysname = platform.system().lower()
+    machine = platform.machine().lower()
+    if sysname == "darwin":
+        return "osx-arm64" if machine in ("arm64", "aarch64") else "osx-x64"
+    if sysname == "linux":
+        if machine in ("aarch64", "arm64"):
+            return "linux-arm64"
+        if machine.startswith("arm"):
+            return "linux-arm"
+        return "linux-x64"
+    if sysname == "windows":
+        if machine in ("arm64", "aarch64"):
+            return "win-arm64"
+        return "win-x64" if "64" in machine else "win-x86"
+    return None
+
+
+def _parse_version(s: str) -> tuple[int, ...]:
+    out = []
+    for part in s.lstrip("v").split("."):
+        digits = re.match(r"\d+", part)
+        if not digits:
+            break
+        out.append(int(digits.group()))
+    return tuple(out) or (0,)
+
+
+def cmd_upgrade_check(dce: str) -> int:
+    try:
+        r = subprocess.run([dce, "--version"], capture_output=True,
+                           text=True, timeout=10)
+        installed_raw = (r.stdout or r.stderr).strip().splitlines()[0]
+    except (OSError, subprocess.TimeoutExpired) as e:
+        die(f"could not run `{dce} --version`: {e}")
+    installed = installed_raw.lstrip("v").strip()
+
+    req = urllib.request.Request(_DCE_GH_API,
+                                 headers={"Accept": "application/vnd.github+json"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.load(resp)
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        die(f"GitHub release lookup failed: {e}")
+
+    latest = data.get("tag_name", "").lstrip("v")
+    if not latest:
+        die("GitHub response missing tag_name")
+
+    iv = _parse_version(installed)
+    lv = _parse_version(latest)
+    behind = iv < lv
+
+    print(f"installed: v{installed}")
+    print(f"latest:    v{latest}  ({data.get('published_at','?')[:10]})")
+    print(f"status:    {'OUTDATED' if behind else 'UP TO DATE'}")
+
+    if not behind:
+        return 0
+
+    sub = _platform_asset_substring()
+    asset = None
+    if sub:
+        for a in data.get("assets") or []:
+            name = a.get("name", "")
+            if name.startswith("DiscordChatExporter.Cli.") and sub in name \
+                    and name.endswith(".zip"):
+                asset = a
+                break
+
+    if not asset:
+        print("\n(no Cli asset matched this platform; download manually from "
+              "https://github.com/Tyrrrz/DiscordChatExporter/releases)",
+              file=sys.stderr)
+        return 1
+
+    url = asset.get("browser_download_url", "")
+    size = int(asset.get("size") or 0)
+    print(f"\nasset:    {asset.get('name')} ({_human_size(size)})")
+    print(f"download: {url}")
+    print("\nsuggested install (matches this repo's existing layout):")
+    print("  curl -L -o /tmp/dce-cli.zip \"" + url + "\"")
+    print("  unzip -o /tmp/dce-cli.zip -d ~/.local/share/dce-cli/")
+    print("  chmod +x ~/.local/share/dce-cli/DiscordChatExporter.Cli")
+    return 1
+
+
 def cmd_passthrough(args: list[str], token: str, dce: str) -> int:
     if "-t" not in args and "--token" not in args:
         # DCE.Cli expects `<subcommand> -t TOKEN`, not `-t TOKEN <subcommand>`.
@@ -899,6 +994,7 @@ commands handled by dce:
                                   flags: --dry-run, --keep (don't delete source files)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
+  upgrade-check                 compare installed DCE.Cli vs latest GitHub release
 
 anything else is forwarded to DiscordChatExporter.Cli with --token auto-injected:
   dce guilds
@@ -932,6 +1028,10 @@ def main(argv: list[str] | None = None) -> int:
     # `token` is self-contained — no DCE.Cli or token-loading needed.
     if cmd == "token":
         return cmd_token(sub_argv)
+
+    # `upgrade-check` needs the DCE binary path but no Discord token.
+    if cmd == "upgrade-check":
+        return cmd_upgrade_check(find_dce_binary())
 
     # Everything else needs both the binary and the resolved token.
     token = load_token(settings_path)
