@@ -15,10 +15,14 @@ exports/
 # python
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
 .venv/
 venv/
 .mypy_cache/
 .ruff_cache/
+.pytest_cache/
 
 # editor
 .vscode/
