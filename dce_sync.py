@@ -1571,7 +1571,7 @@ def _slugify(name: str) -> str:
 
 def cmd_discover(cfg: dict, config_path: Path, token: str, dce: str,
                  guild_id: str, filter_re: str | None, write: bool,
-                 include_threads: str) -> int:
+                 include_threads: str, as_json: bool) -> int:
     out = _dce_channels_output(dce, token, guild_id, include_threads)
 
     # DCE.Cli prints one channel per line; columns vary by version but the
@@ -1596,7 +1596,13 @@ def cmd_discover(cfg: dict, config_path: Path, token: str, dce: str,
         discovered.append((_slugify(name), cid, name))
 
     if not discovered:
-        print("no channels parsed from DCE.Cli output", file=sys.stderr)
+        if as_json:
+            json.dump({"guild": guild_id, "channels": [], "wrote": 0,
+                       "error": "no channels parsed from DCE.Cli output"},
+                      sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print("no channels parsed from DCE.Cli output", file=sys.stderr)
         return 1
 
     pat = re.compile(filter_re, re.I) if filter_re else None
@@ -1620,14 +1626,44 @@ def cmd_discover(cfg: dict, config_path: Path, token: str, dce: str,
         rows.append((status, slug, cid, raw))
 
     if not rows:
-        print("filter matched no channels", file=sys.stderr)
+        if as_json:
+            json.dump({"guild": guild_id, "channels": [], "wrote": 0,
+                       "filter": filter_re,
+                       "error": "filter matched no channels"},
+                      sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print("filter matched no channels", file=sys.stderr)
         return 1
+
+    new_rows = [r for r in rows if r[0] == "new"]
+
+    if as_json:
+        wrote = 0
+        if write and new_rows:
+            cfg.setdefault("channels", {})
+            for _, slug, cid, _ in new_rows:
+                cfg["channels"][slug] = {"id": cid}
+            save_config(config_path, cfg)
+            wrote = len(new_rows)
+        payload = {
+            "guild": guild_id,
+            "filter": filter_re,
+            "include_threads": include_threads,
+            "wrote": wrote,
+            "channels": [
+                {"status": st, "slug": slug, "id": cid, "raw_name": raw}
+                for st, slug, cid, raw in rows
+            ],
+        }
+        json.dump(payload, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 0
 
     w_s = max(len(r[1]) for r in rows)
     for st, slug, cid, raw in rows:
         print(f"  [{st:>8}]  {slug:<{w_s}}  {cid}  # {raw}")
 
-    new_rows = [r for r in rows if r[0] == "new"]
     if not write:
         print(f"\n{len(new_rows)} new, {len(rows) - len(new_rows)} existing. "
               f"Re-run with --write to append.")
@@ -1684,7 +1720,8 @@ commands handled by dce:
                                          --retries N (exponential backoff)
   add NAME CHANNEL_ID           add a channel to channels.yaml
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
-                                  flags: --filter REGEX, --write, --include-threads None|Active|All
+                                  flags: --filter REGEX, --write, --include-threads None|Active|All,
+                                         --json
   stats [--fast] [--json]       per-channel totals (files, msgs, size, date range)
   verify [--quick] [--filter R]  sanity-check every JSON in output_dir parses
                                     [--json] for machine-readable output
@@ -1831,10 +1868,13 @@ def main(argv: list[str] | None = None) -> int:
                        help="append new channels to channels.yaml")
         p.add_argument("--include-threads", default="None",
                        choices=("None", "Active", "All"))
+        p.add_argument("--json", action="store_true", dest="as_json",
+                       help="emit a single JSON object on stdout")
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path) if config_path.is_file() else {}
         return cmd_discover(cfg, config_path, token, dce, a.guild,
-                            a.filter_re, a.write, a.include_threads)
+                            a.filter_re, a.write, a.include_threads,
+                            a.as_json)
 
     if cmd == "merge":
         p = argparse.ArgumentParser(prog="dce merge")
