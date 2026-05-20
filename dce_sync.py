@@ -581,7 +581,7 @@ def _verify_quick(path: Path) -> tuple[str, str | None]:
 
 
 def cmd_verify(cfg: dict, config_path: Path, quick: bool,
-               filter_re: str | None) -> int:
+               filter_re: str | None, as_json: bool) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     if not output_dir.is_dir():
         die(f"output_dir does not exist: {output_dir}")
@@ -591,14 +591,27 @@ def cmd_verify(cfg: dict, config_path: Path, quick: bool,
         pat = re.compile(filter_re, re.I)
         files = [f for f in files if pat.search(f.name)]
 
+    mode_label = "quick" if quick else "full"
+
     if not files:
-        print("no JSON files matched")
+        if as_json:
+            json.dump({
+                "output_dir": str(output_dir),
+                "mode": mode_label,
+                "total": 0, "ok": 0, "failed_count": 0,
+                "files": [],
+            }, sys.stdout, indent=2)
+            sys.stdout.write("\n")
+        else:
+            print("no JSON files matched")
         return 0
 
-    mode = "quick (tail sniff)" if quick else "full (json.load)"
-    print(f"output_dir: {output_dir}")
-    print(f"checking {len(files)} files, {mode}...\n", flush=True)
+    if not as_json:
+        print(f"output_dir: {output_dir}")
+        print(f"checking {len(files)} files, {mode_label} "
+              f"({'tail sniff' if quick else 'json.load'})...\n", flush=True)
 
+    results: list[dict] = []
     bad: list[tuple[str, str, str | None]] = []
     for fp in files:
         size = fp.stat().st_size
@@ -618,12 +631,30 @@ def cmd_verify(cfg: dict, config_path: Path, quick: bool,
                 status, detail = "IO_ERROR", str(e)[:100]
         if status != "OK":
             bad.append((fp.name, status, detail))
-        line = f"  [{status:>10}]  {_human_size(size):>10}  {fp.name}"
-        if detail:
-            line += f"  ({detail})"
-        print(line, flush=True)
+        results.append({
+            "name": fp.name, "size": size,
+            "status": status, "detail": detail,
+        })
+        if not as_json:
+            line = f"  [{status:>10}]  {_human_size(size):>10}  {fp.name}"
+            if detail:
+                line += f"  ({detail})"
+            print(line, flush=True)
 
     ok = len(files) - len(bad)
+
+    if as_json:
+        json.dump({
+            "output_dir": str(output_dir),
+            "mode": mode_label,
+            "total": len(files),
+            "ok": ok,
+            "failed_count": len(bad),
+            "files": results,
+        }, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 1 if bad else 0
+
     print(f"\n{ok}/{len(files)} OK", flush=True)
     if bad:
         print(f"{len(bad)} problem(s):", file=sys.stderr, flush=True)
@@ -1522,7 +1553,8 @@ commands handled by dce:
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
   stats [--fast] [--json]       per-channel totals (files, msgs, size, date range)
-  verify [--quick] [--filter R] sanity-check every JSON in output_dir parses
+  verify [--quick] [--filter R]  sanity-check every JSON in output_dir parses
+                                    [--json] for machine-readable output
   search PATTERN [name ...]     grep archived messages
                                   flags: --regex, --from/--to YYYY-MM-DD,
                                          --author NAME, -n LIMIT, -w WIDTH,
@@ -1717,9 +1749,11 @@ def main(argv: list[str] | None = None) -> int:
                        help="tail sniff only; skips full json.load")
         p.add_argument("--filter", dest="filter_re", default=None,
                        help="regex applied to filename")
+        p.add_argument("--json", action="store_true", dest="as_json",
+                       help="machine-readable report on stdout")
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
-        return cmd_verify(cfg, config_path, a.quick, a.filter_re)
+        return cmd_verify(cfg, config_path, a.quick, a.filter_re, a.as_json)
 
     if cmd == "stats":
         p = argparse.ArgumentParser(prog="dce stats")
