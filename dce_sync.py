@@ -874,32 +874,37 @@ def _scan_file_stats(path: Path) -> tuple[int, str | None, str | None]:
     return (len(msgs), first, last)
 
 
-def cmd_stats(cfg: dict, config_path: Path, fast: bool) -> int:
+def cmd_stats(cfg: dict, config_path: Path, fast: bool, as_json: bool) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     channels = cfg.get("channels") or {}
     if not channels:
         die("no channels registered. Use `dce add NAME CHANNEL_ID`.")
 
-    print(f"output_dir: {output_dir}", flush=True)
-    rows: list[tuple[str, int, int, int, str]] = []
+    if not as_json:
+        print(f"output_dir: {output_dir}", flush=True)
+
+    # rows: (name, files, msgs, bytes, first_date|None, last_date|None,
+    #        skipped: bool, has_exports: bool)
+    rows: list[tuple[str, int, int, int, str | None, str | None, bool, bool]] = []
     total_files = total_msgs = total_bytes = 0
 
     for name, ch in channels.items():
         cid = str(ch["id"])
         files = _files_for_channel(output_dir, cid)
         if not files:
-            rows.append((name, 0, 0, 0, "(no exports)"))
+            rows.append((name, 0, 0, 0, None, None, False, False))
             continue
 
         ch_bytes = sum(f.stat().st_size for f in files)
         if fast:
-            rows.append((name, len(files), 0, ch_bytes, "(--fast: msgs/range skipped)"))
+            rows.append((name, len(files), 0, ch_bytes, None, None, True, True))
             total_files += len(files)
             total_bytes += ch_bytes
             continue
 
-        print(f"  scanning {name} ({len(files)} files, {_human_size(ch_bytes)})...",
-              flush=True)
+        if not as_json:
+            print(f"  scanning {name} ({len(files)} files, "
+                  f"{_human_size(ch_bytes)})...", flush=True)
         ch_msgs = 0
         first: str | None = None
         last: str | None = None
@@ -910,18 +915,51 @@ def cmd_stats(cfg: dict, config_path: Path, fast: bool) -> int:
                 first = fst
             if lst and (last is None or lst > last):
                 last = lst
-        date_range = f"{first} -> {last}" if first else "(empty)"
-        rows.append((name, len(files), ch_msgs, ch_bytes, date_range))
+        rows.append((name, len(files), ch_msgs, ch_bytes, first, last, False, True))
         total_files += len(files)
         total_msgs += ch_msgs
         total_bytes += ch_bytes
 
-    w_n = max(len(r[0]) for r in rows + [("TOTAL", 0, 0, 0, "")])
+    if as_json:
+        result = {
+            "output_dir": str(output_dir),
+            "fast": fast,
+            "totals": {
+                "files": total_files,
+                "msgs": total_msgs,
+                "bytes": total_bytes,
+            },
+            "channels": {
+                name: {
+                    "files": fc,
+                    "msgs": None if (skipped or not has) else mc,
+                    "bytes": b,
+                    "first": first,
+                    "last": last,
+                    "skipped": skipped,
+                }
+                for name, fc, mc, b, first, last, skipped, has in rows
+            },
+        }
+        json.dump(result, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 0
+
+    w_n = max(len(r[0]) for r in rows + [("TOTAL", 0, 0, 0, None, None, False, False)])
     print()
-    print(f"  {'channel':<{w_n}}  {'files':>5}  {'msgs':>9}  {'size':>10}  date range")
-    for n, fc, mc, b, dr in rows:
+    print(f"  {'channel':<{w_n}}  {'files':>5}  {'msgs':>9}  {'size':>10}  "
+          f"date range")
+    for name, fc, mc, b, first, last, skipped, has in rows:
+        if not has:
+            dr = "(no exports)"
+        elif skipped:
+            dr = "(--fast: msgs/range skipped)"
+        elif first:
+            dr = f"{first} -> {last}"
+        else:
+            dr = "(empty)"
         msg_s = f"{mc:>9,}" if mc else "        -"
-        print(f"  {n:<{w_n}}  {fc:>5}  {msg_s}  {_human_size(b):>10}  {dr}")
+        print(f"  {name:<{w_n}}  {fc:>5}  {msg_s}  {_human_size(b):>10}  {dr}")
     print(f"  {'TOTAL':<{w_n}}  {total_files:>5}  {total_msgs:>9,}  "
           f"{_human_size(total_bytes):>10}")
     return 0
@@ -1419,7 +1457,7 @@ commands handled by dce:
   add NAME CHANNEL_ID           add a channel to channels.yaml
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
-  stats [--fast]                per-channel totals (files, msgs, size, date range)
+  stats [--fast] [--json]       per-channel totals (files, msgs, size, date range)
   verify [--quick] [--filter R] sanity-check every JSON in output_dir parses
   search PATTERN [name ...]     grep archived messages
                                   flags: --regex, --from/--to YYYY-MM-DD,
@@ -1609,9 +1647,13 @@ def main(argv: list[str] | None = None) -> int:
             "--fast", action="store_true",
             help="skip JSON parse: file count + bytes only (no msg/date)",
         )
+        p.add_argument(
+            "--json", action="store_true", dest="as_json",
+            help="emit machine-readable JSON instead of the table",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
-        return cmd_stats(cfg, config_path, a.fast)
+        return cmd_stats(cfg, config_path, a.fast, a.as_json)
 
     if cmd == "add":
         p = argparse.ArgumentParser(prog="dce add")
