@@ -135,7 +135,8 @@ def load_token(explicit_path: str | None) -> str:
 
 
 def cmd_token(rest: list[str]) -> int:
-    usage = "usage: dce token (set <token> | show | path | rm)"
+    usage = ("usage: dce token (set <token> | show | path | rm | "
+             "age [--max-days N])")
     if not rest or rest[0] in ("-h", "--help"):
         print(usage)
         return 0
@@ -165,6 +166,34 @@ def cmd_token(rest: list[str]) -> int:
             print(f"removed {TOKEN_FILE}")
         else:
             print(f"no token at {TOKEN_FILE}")
+        return 0
+    if action == "age":
+        if not TOKEN_FILE.is_file():
+            print(f"no token at {TOKEN_FILE}", file=sys.stderr)
+            return 1
+        max_days: int | None = None
+        i = 1
+        while i < len(rest):
+            if rest[i] == "--max-days" and i + 1 < len(rest):
+                try:
+                    max_days = int(rest[i + 1])
+                except ValueError:
+                    die(f"--max-days: expected integer (got {rest[i + 1]!r})")
+                if max_days < 0:
+                    die("--max-days must be >= 0")
+                i += 2
+            else:
+                die(f"unknown arg to `token age`: {rest[i]!r}")
+        mtime = TOKEN_FILE.stat().st_mtime
+        saved = datetime.fromtimestamp(mtime)
+        age_days = (datetime.now() - saved).days
+        print(f"saved: {saved.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"age:   {age_days} day(s)")
+        if max_days is not None and age_days > max_days:
+            print(f"warning: exceeds --max-days {max_days} -- consider "
+                  f"`dce token set <NEW>` after rotating in Discord settings",
+                  file=sys.stderr)
+            return 1
         return 0
     die(f"unknown token subcommand: {action}\n{usage}")
     return 1  # unreachable
@@ -1506,6 +1535,8 @@ commands handled by dce:
                                   flags: --dry-run, --keep (don't delete source files)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
+  token age [--max-days N]      report how long ago the token was saved
+                                (exits 1 if older than --max-days)
   upgrade-check                 compare installed DCE.Cli vs latest GitHub release
   completion (zsh|bash)         print shell completion script to stdout
 
