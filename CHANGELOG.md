@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file. Format base
 
 ## [Unreleased]
 
+### Added
+
+- `dce status` — composite health snapshot (token age, channel counts, archive size, DCE.Cli version) with `--json`, `--verify`, `--check-updates`. Exits 1 when outdated or any verify check fails, so it drops into a cron `||` branch.
+- `dce list --json` — registry as `{output_dir, channels: [{name, id, last_after}]}`.
+- `dce verify --json` — integrity report as `{output_dir, mode, total, ok, failed_count, files: [{name, size, status, detail}]}`.
+- GitHub Actions smoke test (`.github/workflows/test.yml`) — Python 3.10/3.11/3.12 matrix; checks syntax, import, `--help` covers every subcommand, both completion scripts parse, token round-trip, parser-error formatting, sdist + wheel build.
+- README CI badge and `dce status` / `--until` examples.
+
+### Internal
+
+- `_installed_dce_version` and `_latest_dce_version` extracted from `cmd_upgrade_check` so `dce status` can reuse them with silent (None on error) semantics while `upgrade-check` keeps its loud `die()` path.
+
 ## [0.1.0] - 2026-05-20
 
 Initial tagged release. Wraps [DiscordChatExporter.Cli](https://github.com/Tyrrrz/DiscordChatExporter) with friendly channel names, parallel + incremental sync, archive tooling, and machine-readable output for cron / pipelines.

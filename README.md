@@ -1,12 +1,15 @@
 # dce
 
+[![test](https://github.com/srba/dce-sync/actions/workflows/test.yml/badge.svg)](https://github.com/srba/dce-sync/actions/workflows/test.yml)
+
 A thin wrapper around [DiscordChatExporter.Cli](https://github.com/Tyrrrz/DiscordChatExporter) that adds the bits the underlying CLI doesn't ship:
 
 - **Friendly channel names** via a small `channels.yaml` registry — type `dce sync pvm` instead of `discordchatexporter export -c 529041672999403554 …`.
 - **Persistent token storage** with sensible discovery order so `-t TOKEN` never has to live in shell history.
 - **Smart incremental sync** — parses existing export filenames so `dce sync` only pulls new messages per channel.
-- **Parallel multi-channel sync** with optional periodic size/delta snapshots.
-- **Local archive tools** — `verify`, `stats`, `merge`, `snapshot`, `search`, `export-csv`.
+- **Parallel multi-channel sync** with optional periodic size/delta snapshots and retry with exponential backoff.
+- **Local archive tools** — `verify`, `stats`, `merge`, `snapshot`, `search`, `export-csv`, `status`.
+- **Machine-readable output** — `--json` on every informational command (list, stats, search, verify, status) for jq / dashboards / cron pipelines.
 
 Anything `dce` doesn't recognize is forwarded to `DiscordChatExporter.Cli` unchanged (with `-t TOKEN` auto-injected), so the full upstream surface area stays available. No shadow API to maintain.
 
@@ -61,15 +64,17 @@ dce sync                           # incremental pull (all channels)
 
 | Command | Purpose |
 | --- | --- |
-| `dce list` | Show registered channels and the latest `(after X)` date in `output_dir` for each. |
+| `dce list [--json]` | Show registered channels and the latest `(after X)` date in `output_dir` for each. |
 | `dce sync [name…]` | Incremental sync. Flags below. |
+| `dce status` | One-shot health snapshot (token age, channels, archive size, DCE.Cli version). `[--json] [--verify] [--check-updates]`. |
 | `dce add NAME CHANNEL_ID` | Register a channel manually. |
 | `dce discover --guild GID` | List a server's channels (and optionally append new ones to `channels.yaml`). |
 | `dce token set/show/path/rm` | Manage the persisted Discord token. |
-| `dce stats [--fast]` | Per-channel totals: files, msgs, size, date range. |
-| `dce verify [--quick]` | Sanity-check every JSON in `output_dir` (OK / TRUNCATED / CORRUPT / …). |
+| `dce token age [--max-days N]` | Rotation reminder; exits 1 when the saved token is older than the cap. |
+| `dce stats [--fast] [--json]` | Per-channel totals: files, msgs, size, date range. |
+| `dce verify [--quick] [--json]` | Sanity-check every JSON in `output_dir` (OK / TRUNCATED / CORRUPT / …). |
 | `dce merge [name…]` | Consolidate per-channel `(after X)` files into a single deduped archive. |
-| `dce search PATTERN [name…]` | Grep messages across the archive. |
+| `dce search PATTERN [name…] [--json]` | Grep messages across the archive. `--json` emits JSONL. |
 | `dce export-csv [name…]` | Dump messages to CSV (one row per message). |
 | `dce snapshot` | Bundle `channels.yaml` + every export into a single `.tar.gz` with a manifest. |
 | `dce upgrade-check` | Compare installed `DCE.Cli` against the latest GitHub release. |
@@ -83,6 +88,7 @@ dce sync [name …]
   --dry-run                 print the planned command(s) without exporting
   -j, --jobs N              run up to N channel exports in parallel
   --since 7d|3w|2m|1y       override file-based last_after with NOW - X
+  --until YYYY-MM-DD        upper bound; passes --before to DCE.Cli
   --watch [SECONDS]         in parallel mode, print a size/delta snapshot
                             every N seconds (default 10s)
   -q, --quiet               suppress chatter; only failures + final summary
@@ -99,6 +105,15 @@ dce sync -j 4 --watch 10 --retries 3
 
 # force-refresh the last week across every registered channel
 dce sync --since 7d
+
+# historic backfill of a fixed window
+dce sync --since 90d --until 2026-01-01
+
+# daily cron health check; nonzero exit triggers your mailer
+dce status --check-updates --verify || mail -s "dce archive" me@…
+
+# stale-channel detector
+dce list --json | jq -r '.channels[] | select(.last_after == null) | .name'
 
 # silent cron-style sync (DCE_QUIET also works)
 dce sync --quiet --retries 2
