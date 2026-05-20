@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -282,9 +283,88 @@ def _run_export(name: str, cmd: list[str], token: str, print_lock: threading.Loc
     return proc.returncode
 
 
+class _ProgressTracker:
+    """Background watcher for parallel sync. Polls the per-channel output file
+    on disk and prints a one-line-per-active-channel snapshot every N seconds.
+    Mark_start / mark_done are called from the worker threads."""
+
+    def __init__(self, output_dir: Path, channel_ids: dict[str, str],
+                 interval: float, print_lock: threading.Lock):
+        self.output_dir = output_dir
+        self.channel_ids = dict(channel_ids)
+        self.interval = max(2.0, float(interval))
+        self.print_lock = print_lock
+        self._starts: dict[str, float] = {}
+        self._sizes: dict[str, int] = {}
+        self._done: set[str] = set()
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=self.interval + 2)
+
+    def mark_start(self, name: str) -> None:
+        with self._lock:
+            self._starts[name] = time.monotonic()
+
+    def mark_done(self, name: str) -> None:
+        with self._lock:
+            self._done.add(name)
+
+    def _loop(self) -> None:
+        while not self._stop.wait(self.interval):
+            self._print_snapshot()
+
+    def _print_snapshot(self) -> None:
+        with self._lock:
+            active = [(n, c) for n, c in self.channel_ids.items()
+                      if n in self._starts and n not in self._done]
+            starts = dict(self._starts)
+            prev_sizes = dict(self._sizes)
+
+        if not active:
+            return
+
+        rows: list[tuple[str, str, str, str]] = []
+        new_sizes: dict[str, int] = {}
+        for name, cid in active:
+            files = _files_for_channel(self.output_dir, cid)
+            if not files:
+                continue
+            latest = max(files, key=lambda p: p.stat().st_mtime)
+            try:
+                size = latest.stat().st_size
+            except OSError:
+                continue
+            new_sizes[name] = size
+            delta = size - prev_sizes.get(name, 0)
+            rate = f"+{_human_size(delta)}" if delta > 0 else "idle"
+            elapsed = int(time.monotonic() - starts[name])
+            rows.append((name, _human_size(size), rate,
+                         f"{elapsed // 60}:{elapsed % 60:02d}"))
+
+        with self._lock:
+            self._sizes.update(new_sizes)
+
+        if not rows:
+            return
+        w = max(len(r[0]) for r in rows)
+        with self.print_lock:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            print(f"  --- progress {stamp} ---", flush=True)
+            for n, s, r, t in rows:
+                print(f"    [{n:<{w}}] size={s:>10}  delta={r:>10}  elapsed={t}",
+                      flush=True)
+
+
 def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
              targets: list[str], dry_run: bool, jobs: int,
-             since: date | None) -> int:
+             since: date | None, watch: float) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -304,7 +384,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
     requested = targets or list(channels.keys())
     today = date.today()
     failed: list[str] = []
-    queue: list[tuple[str, list[str], date | None]] = []
+    queue: list[tuple[str, str, list[str], date | None]] = []
 
     for name in requested:
         if name not in channels:
@@ -325,7 +405,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
             redacted = ["<TOKEN>" if c == token else c for c in cmd]
             print(f"  {name}: {' '.join(redacted)}", flush=True)
             continue
-        queue.append((name, cmd, last))
+        queue.append((name, cid, cmd, last))
 
     if not queue:
         return 1 if failed else 0
@@ -334,7 +414,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
     prefix = jobs > 1
 
     if jobs == 1:
-        for name, cmd, last in queue:
+        for name, _cid, cmd, last in queue:
             print(f"  {name}: exporting (after={last or 'beginning'})...", flush=True)
             rc = _run_export(name, cmd, token, print_lock, prefix_lines=False)
             if rc != 0:
@@ -343,13 +423,32 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
         return 1 if failed else 0
 
     # Parallel path: announce all jobs up front, then dispatch.
-    for name, _, last in queue:
+    for name, _cid, _cmd, last in queue:
         print(f"  {name}: queued (after={last or 'beginning'})", flush=True)
+
+    tracker: _ProgressTracker | None = None
+    if watch > 0:
+        tracker = _ProgressTracker(
+            output_dir=output_dir,
+            channel_ids={name: cid for name, cid, _, _ in queue},
+            interval=watch,
+            print_lock=print_lock,
+        )
+        tracker.start()
+
+    def _wrapped(name: str, cmd: list[str]) -> int:
+        if tracker:
+            tracker.mark_start(name)
+        try:
+            return _run_export(name, cmd, token, print_lock, prefix)
+        finally:
+            if tracker:
+                tracker.mark_done(name)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
         futures = {
-            ex.submit(_run_export, name, cmd, token, print_lock, prefix): name
-            for name, cmd, _ in queue
+            ex.submit(_wrapped, name, cmd): name
+            for name, _cid, cmd, _ in queue
         }
         for fut in concurrent.futures.as_completed(futures):
             name = futures[fut]
@@ -366,6 +465,8 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
                     print(f"  [{name}] FAILED (exit {rc})", file=sys.stderr, flush=True)
                     failed.append(name)
 
+    if tracker:
+        tracker.stop()
     return 1 if failed else 0
 
 
@@ -787,7 +888,8 @@ commands handled by dce:
   list                          show registered channels and last export date
   sync [name ...]               incremental sync (default: all)
                                   flags: --dry-run, -j/--jobs N (parallel),
-                                         --since 7d|3w|2m|1y (override last_after)
+                                         --since 7d|3w|2m|1y (override last_after),
+                                         --watch [SECONDS] (size/delta snapshots)
   add NAME CHANNEL_ID           add a channel to channels.yaml
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
@@ -851,11 +953,17 @@ def main(argv: list[str] | None = None) -> int:
             "--since", default=None,
             help="override file-based last_after with NOW-X (e.g. 7d, 3w, 2m, 1y)",
         )
+        p.add_argument(
+            "--watch", type=float, nargs="?", const=10.0, default=0.0,
+            metavar="SECONDS",
+            help="periodic size/delta snapshot per channel (parallel mode only; "
+                 "default off, --watch alone = every 10s)",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         since = parse_since(a.since) if a.since else None
         return cmd_sync(cfg, config_path, token, dce, a.channels,
-                        a.dry_run, a.jobs, since)
+                        a.dry_run, a.jobs, since, a.watch)
 
     if cmd == "discover":
         p = argparse.ArgumentParser(prog="dce discover")
