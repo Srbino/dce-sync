@@ -1848,7 +1848,8 @@ commands handled by dce:
                                          --until YYYY-MM-DD (upper bound),
                                          --watch [SECONDS] (size/delta snapshots),
                                          -q/--quiet (cron-friendly; DCE_QUIET=1 env),
-                                         --retries N (exponential backoff)
+                                         --retries N (exponential backoff),
+                                         -o/--output DIR (per-run output override)
   add NAME CHANNEL_ID           add a channel to channels.yaml
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All,
@@ -1977,8 +1978,17 @@ def main(argv: list[str] | None = None) -> int:
             help="upper bound: stop fetching at this date (passes "
                  "--before to DCE.Cli)",
         )
+        p.add_argument(
+            "-o", "--output", default=None, metavar="DIR",
+            help="override the config's output_dir for this run only "
+                 "(treated as absolute or CWD-relative; existing files "
+                 "there still drive incremental sync)",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
+        if a.output:
+            cfg = dict(cfg)
+            cfg["output_dir"] = str(Path(a.output).expanduser().resolve())
         since = parse_since(a.since) if a.since else None
         until = parse_until(a.until) if a.until else None
         quiet = a.quiet or bool(os.environ.get("DCE_QUIET"))
