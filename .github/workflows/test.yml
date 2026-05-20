@@ -49,6 +49,12 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -qq zsh
           dce completion zsh | zsh -n -
 
+      - name: Completion — fish script is valid
+        run: |
+          sudo apt-get install -qq fish
+          dce completion fish > /tmp/dce.fish
+          fish --no-execute /tmp/dce.fish
+
       - name: Token mgmt — set / show / age / rm round-trip
         run: |
           dce token set "test-token-1234567890"

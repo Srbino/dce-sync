@@ -1312,7 +1312,7 @@ _dce() {
       _values 'token action' set show path rm
       ;;
     completion)
-      _values 'shell' zsh bash
+      _values 'shell' zsh bash fish
       ;;
   esac
 }
@@ -1352,10 +1352,105 @@ _dce_completion() {
     stats)   COMPREPLY=( $(compgen -W "--fast" -- "$cur") ) ;;
     discover) COMPREPLY=( $(compgen -W "--guild --filter --write --include-threads" -- "$cur") ) ;;
     token)   COMPREPLY=( $(compgen -W "set show path rm" -- "$cur") ) ;;
-    completion) COMPREPLY=( $(compgen -W "zsh bash" -- "$cur") ) ;;
+    completion) COMPREPLY=( $(compgen -W "zsh bash fish" -- "$cur") ) ;;
   esac
 }
 complete -F _dce_completion dce
+"""
+
+
+_FISH_COMPLETION = r"""# Install: dce completion fish > ~/.config/fish/completions/dce.fish
+# Fish auto-loads completion files from that directory; no .config change needed.
+
+function __dce_channel_names
+  for cy in ./channels.yaml $HOME/.config/dce-sync/channels.yaml
+    if test -f $cy
+      awk '/^[[:space:]]+[a-z][a-zA-Z0-9_-]*:[[:space:]]*$/ { gsub(":",""); gsub(/^[[:space:]]+/,""); print }' $cy
+      return
+    end
+  end
+end
+
+complete -c dce -f
+
+# Subcommands (only suggested when no subcommand seen yet).
+complete -c dce -n __fish_use_subcommand -a list          -d 'show registered channels'
+complete -c dce -n __fish_use_subcommand -a sync          -d 'incremental sync'
+complete -c dce -n __fish_use_subcommand -a status        -d 'composite health snapshot'
+complete -c dce -n __fish_use_subcommand -a add           -d 'register a channel'
+complete -c dce -n __fish_use_subcommand -a discover      -d "list a server's channels"
+complete -c dce -n __fish_use_subcommand -a verify        -d 'sanity-check JSONs'
+complete -c dce -n __fish_use_subcommand -a stats         -d 'per-channel totals'
+complete -c dce -n __fish_use_subcommand -a merge         -d 'consolidate split exports'
+complete -c dce -n __fish_use_subcommand -a token         -d 'manage Discord token'
+complete -c dce -n __fish_use_subcommand -a upgrade-check -d 'compare DCE.Cli vs latest GitHub'
+complete -c dce -n __fish_use_subcommand -a completion    -d 'print shell completion'
+complete -c dce -n __fish_use_subcommand -a search        -d 'grep messages'
+complete -c dce -n __fish_use_subcommand -a export-csv    -d 'dump messages to CSV'
+complete -c dce -n __fish_use_subcommand -a snapshot      -d 'tar.gz archive bundle'
+
+# sync: channel names + flags
+complete -c dce -n '__fish_seen_subcommand_from sync' -a '(__dce_channel_names)'
+complete -c dce -n '__fish_seen_subcommand_from sync' -l dry-run -d 'preview only'
+complete -c dce -n '__fish_seen_subcommand_from sync' -l jobs    -s j -d 'parallel jobs'
+complete -c dce -n '__fish_seen_subcommand_from sync' -l since   -d 'NOW-X override'
+complete -c dce -n '__fish_seen_subcommand_from sync' -l until   -d 'upper bound YYYY-MM-DD'
+complete -c dce -n '__fish_seen_subcommand_from sync' -l watch   -d 'size/delta snapshots'
+complete -c dce -n '__fish_seen_subcommand_from sync' -l quiet   -s q -d 'cron-friendly silent'
+complete -c dce -n '__fish_seen_subcommand_from sync' -l retries -d 'backoff retry count'
+
+# merge: channel names + flags
+complete -c dce -n '__fish_seen_subcommand_from merge' -a '(__dce_channel_names)'
+complete -c dce -n '__fish_seen_subcommand_from merge' -l dry-run -d 'preview only'
+complete -c dce -n '__fish_seen_subcommand_from merge' -l keep    -d 'keep source files'
+
+# verify
+complete -c dce -n '__fish_seen_subcommand_from verify' -l quick  -d 'tail-sniff only'
+complete -c dce -n '__fish_seen_subcommand_from verify' -l filter -d 'regex on filename'
+complete -c dce -n '__fish_seen_subcommand_from verify' -l json   -d 'machine-readable'
+
+# stats
+complete -c dce -n '__fish_seen_subcommand_from stats' -l fast -d 'size only'
+complete -c dce -n '__fish_seen_subcommand_from stats' -l json -d 'machine-readable'
+
+# discover
+complete -c dce -n '__fish_seen_subcommand_from discover' -l guild           -d 'guild id'
+complete -c dce -n '__fish_seen_subcommand_from discover' -l filter          -d 'regex on name'
+complete -c dce -n '__fish_seen_subcommand_from discover' -l write           -d 'append to channels.yaml'
+complete -c dce -n '__fish_seen_subcommand_from discover' -l include-threads -d 'None|Active|All' \
+                                                          -a 'None Active All'
+complete -c dce -n '__fish_seen_subcommand_from discover' -l json            -d 'machine-readable'
+
+# status
+complete -c dce -n '__fish_seen_subcommand_from status' -l json          -d 'machine-readable'
+complete -c dce -n '__fish_seen_subcommand_from status' -l check-updates -d 'hit GitHub releases'
+complete -c dce -n '__fish_seen_subcommand_from status' -l verify        -d 'also run --quick verify'
+
+# search
+complete -c dce -n '__fish_seen_subcommand_from search' -l regex  -d 'regex pattern'
+complete -c dce -n '__fish_seen_subcommand_from search' -l from   -d 'YYYY-MM-DD'
+complete -c dce -n '__fish_seen_subcommand_from search' -l to     -d 'YYYY-MM-DD'
+complete -c dce -n '__fish_seen_subcommand_from search' -l author -d 'author substring'
+complete -c dce -n '__fish_seen_subcommand_from search' -l limit  -s n -d 'stop after N hits'
+complete -c dce -n '__fish_seen_subcommand_from search' -l json   -d 'JSONL output'
+
+# export-csv
+complete -c dce -n '__fish_seen_subcommand_from export-csv' -l from   -d 'YYYY-MM-DD'
+complete -c dce -n '__fish_seen_subcommand_from export-csv' -l to     -d 'YYYY-MM-DD'
+complete -c dce -n '__fish_seen_subcommand_from export-csv' -l output -s o -d 'output file'
+
+# snapshot
+complete -c dce -n '__fish_seen_subcommand_from snapshot' -l output   -s o -d 'output path'
+complete -c dce -n '__fish_seen_subcommand_from snapshot' -l compress -a 'gz none'
+
+# token
+complete -c dce -n '__fish_seen_subcommand_from token' -a 'set show path rm age'
+
+# list
+complete -c dce -n '__fish_seen_subcommand_from list' -l json -d 'machine-readable'
+
+# completion (meta)
+complete -c dce -n '__fish_seen_subcommand_from completion' -a 'zsh bash fish'
 """
 
 
@@ -1364,8 +1459,10 @@ def cmd_completion(shell: str) -> int:
         sys.stdout.write(_ZSH_COMPLETION)
     elif shell == "bash":
         sys.stdout.write(_BASH_COMPLETION)
+    elif shell == "fish":
+        sys.stdout.write(_FISH_COMPLETION)
     else:
-        die(f"unsupported shell: {shell} (zsh, bash)")
+        die(f"unsupported shell: {shell} (zsh, bash, fish)")
     return 0
 
 
@@ -1777,7 +1874,7 @@ commands handled by dce:
   status [--json] [--check-updates] [--verify]
                                 composite health snapshot (token age, channel
                                 counts, archive size, DCE.Cli version)
-  completion (zsh|bash)         print shell completion script to stdout
+  completion (zsh|bash|fish)    print shell completion script to stdout
 
 anything else is forwarded to DiscordChatExporter.Cli with --token auto-injected:
   dce guilds
