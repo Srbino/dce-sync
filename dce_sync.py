@@ -43,7 +43,7 @@ except ImportError:
 
 
 KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify",
-              "merge", "upgrade-check"}
+              "merge", "upgrade-check", "completion"}
 
 _DCE_GH_API = "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/latest"
 
@@ -759,6 +759,139 @@ def cmd_add(cfg: dict, config_path: Path, name: str, channel_id: str) -> int:
     return 0
 
 
+_ZSH_COMPLETION = r"""#compdef dce
+# Install: dce completion zsh > ~/.zfunc/_dce
+# Then add to ~/.zshrc:
+#   fpath=(~/.zfunc $fpath); autoload -Uz compinit && compinit
+
+_dce_channels() {
+  local cy
+  for cy in ./channels.yaml "$HOME/.config/dce-sync/channels.yaml"; do
+    if [[ -f $cy ]]; then
+      awk '/^[[:space:]]+[a-z][a-zA-Z0-9_-]*:[[:space:]]*$/ {
+            gsub(":",""); gsub(/^[[:space:]]+/,""); print
+          }' "$cy"
+      return
+    fi
+  done
+}
+
+_dce() {
+  local -a cmds
+  cmds=(
+    'list:show registered channels'
+    'sync:incremental sync'
+    'add:register a channel'
+    'discover:list a server'\''s channels'
+    'verify:sanity-check JSONs'
+    'stats:per-channel totals'
+    'merge:consolidate split exports'
+    'token:manage stored Discord token'
+    'upgrade-check:compare installed DCE.Cli vs latest GitHub release'
+    'completion:print shell completion script'
+    'guilds:passthrough (DCE.Cli)'
+    'channels:passthrough'
+    'export:passthrough'
+    'exportguild:passthrough'
+    'exportdm:passthrough'
+    'exportall:passthrough'
+  )
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'dce command' cmds
+    return
+  fi
+  local sub=$words[2]
+  case $sub in
+    sync)
+      local chans
+      chans=( ${(f)"$(_dce_channels)"} )
+      _arguments \
+        '--dry-run[preview only]' \
+        '-j+[parallel jobs]:N' '--jobs=[parallel jobs]:N' \
+        '--since=[NOW-X override]:spec (e.g. 7d, 2w)' \
+        '--watch[size/delta snapshots]' '--watch=[size/delta snapshots]:seconds' \
+        '*:channel:('"${chans[*]}"')'
+      ;;
+    merge)
+      local chans; chans=( ${(f)"$(_dce_channels)"} )
+      _arguments \
+        '--dry-run[preview only]' '--keep[keep source files]' \
+        '*:channel:('"${chans[*]}"')'
+      ;;
+    verify)
+      _arguments '--quick[tail sniff]' '--filter=[regex]:regex'
+      ;;
+    stats)
+      _arguments '--fast[size only]'
+      ;;
+    discover)
+      _arguments \
+        '--guild=[guild id]:id' \
+        '--filter=[regex on name]:regex' \
+        '--write[append to channels.yaml]' \
+        '--include-threads=[mode]:mode:(None Active All)'
+      ;;
+    token)
+      _values 'token action' set show path rm
+      ;;
+    completion)
+      _values 'shell' zsh bash
+      ;;
+  esac
+}
+_dce "$@"
+"""
+
+
+_BASH_COMPLETION = r"""# Install: dce completion bash > ~/.bash_completion.d/dce
+# Then: source ~/.bash_completion.d/dce  (or rely on bash-completion's loader)
+
+_dce_completion() {
+  local cur prev words cword
+  COMPREPLY=()
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  cword=$COMP_CWORD
+
+  local cmds="list sync add discover verify stats merge token upgrade-check completion guilds channels export exportguild exportdm exportall"
+
+  if (( cword == 1 )); then
+    COMPREPLY=( $(compgen -W "$cmds" -- "$cur") )
+    return
+  fi
+
+  local sub="${COMP_WORDS[1]}"
+  local chans=""
+  if [[ "$sub" == "sync" || "$sub" == "merge" ]]; then
+    local cy
+    for cy in ./channels.yaml "$HOME/.config/dce-sync/channels.yaml"; do
+      [[ -f $cy ]] && chans=$(awk '/^[[:space:]]+[a-z][a-zA-Z0-9_-]*:[[:space:]]*$/ { gsub(":",""); gsub(/^[[:space:]]+/,""); print }' "$cy") && break
+    done
+  fi
+
+  case "$sub" in
+    sync)    COMPREPLY=( $(compgen -W "--dry-run -j --jobs --since --watch $chans" -- "$cur") ) ;;
+    merge)   COMPREPLY=( $(compgen -W "--dry-run --keep $chans" -- "$cur") ) ;;
+    verify)  COMPREPLY=( $(compgen -W "--quick --filter" -- "$cur") ) ;;
+    stats)   COMPREPLY=( $(compgen -W "--fast" -- "$cur") ) ;;
+    discover) COMPREPLY=( $(compgen -W "--guild --filter --write --include-threads" -- "$cur") ) ;;
+    token)   COMPREPLY=( $(compgen -W "set show path rm" -- "$cur") ) ;;
+    completion) COMPREPLY=( $(compgen -W "zsh bash" -- "$cur") ) ;;
+  esac
+}
+complete -F _dce_completion dce
+"""
+
+
+def cmd_completion(shell: str) -> int:
+    if shell == "zsh":
+        sys.stdout.write(_ZSH_COMPLETION)
+    elif shell == "bash":
+        sys.stdout.write(_BASH_COMPLETION)
+    else:
+        die(f"unsupported shell: {shell} (zsh, bash)")
+    return 0
+
+
 def _platform_asset_substring() -> str | None:
     """Substring used in DCE.Cli release asset filenames for the current host
     (e.g. `osx-arm64`). Returns None for unsupported platforms."""
@@ -995,6 +1128,7 @@ commands handled by dce:
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
   token show | path | rm        inspect / locate / remove the saved token
   upgrade-check                 compare installed DCE.Cli vs latest GitHub release
+  completion (zsh|bash)         print shell completion script to stdout
 
 anything else is forwarded to DiscordChatExporter.Cli with --token auto-injected:
   dce guilds
@@ -1032,6 +1166,12 @@ def main(argv: list[str] | None = None) -> int:
     # `upgrade-check` needs the DCE binary path but no Discord token.
     if cmd == "upgrade-check":
         return cmd_upgrade_check(find_dce_binary())
+
+    # `completion` is fully self-contained — emits a static script to stdout.
+    if cmd == "completion":
+        if not sub_argv or sub_argv[0] in ("-h", "--help"):
+            die("usage: dce completion (zsh|bash)")
+        return cmd_completion(sub_argv[0])
 
     # Everything else needs both the binary and the resolved token.
     token = load_token(settings_path)
