@@ -1,0 +1,11 @@
+LICENSE
+README.md
+dce_sync.py
+pyproject.toml
+dce_sync.egg-info/PKG-INFO
+dce_sync.egg-info/SOURCES.txt
+dce_sync.egg-info/dependency_links.txt
+dce_sync.egg-info/entry_points.txt
+dce_sync.egg-info/requires.txt
+dce_sync.egg-info/top_level.txt
+tests/test_dce_sync.py
