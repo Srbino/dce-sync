@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import fnmatch
 import io
 import json
 import os
@@ -471,7 +472,8 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
             file=sys.stderr,
         )
 
-    requested = targets or list(channels.keys())
+    requested = (_expand_channel_targets(targets, channels)
+                 if targets else list(channels.keys()))
     today = date.today()
     failed: list[str] = []
     queue: list[tuple[str, str, list[str], date | None]] = []
@@ -776,6 +778,8 @@ def cmd_export_csv(cfg: dict, config_path: Path, targets: list[str],
 
     if not targets:
         targets = list(channels_cfg.keys())
+    else:
+        targets = _expand_channel_targets(targets, channels_cfg)
     unknown = [n for n in targets if n not in channels_cfg]
     if unknown:
         die(f"unknown channel(s): {', '.join(unknown)}")
@@ -858,6 +862,7 @@ def cmd_search(cfg: dict, config_path: Path, pattern: str,
         die("no channels registered")
 
     if targets:
+        targets = _expand_channel_targets(targets, channels_cfg)
         unknown = [n for n in targets if n not in channels_cfg]
         if unknown:
             die(f"unknown channel(s): {', '.join(unknown)}")
@@ -947,6 +952,34 @@ def cmd_search(cfg: dict, config_path: Path, pattern: str,
     else:
         print(f"-- {hits} match(es) --", file=sys.stderr, flush=True)
     return 0
+
+
+_GLOB_RX = re.compile(r"[*?\[]")
+
+
+def _expand_channel_targets(targets: list[str],
+                            channels: dict[str, dict]) -> list[str]:
+    """Expand fnmatch-style globs in `targets` against the registered channel
+    names. Plain names (no `*`, `?`, `[`) pass through untouched so the
+    downstream unknown-channel check still fires for typos. Globs that match
+    nothing are a hard error -- silent empty results would mask user
+    intent."""
+    result: list[str] = []
+    seen: set[str] = set()
+    for t in targets:
+        if _GLOB_RX.search(t):
+            matched = [n for n in channels if fnmatch.fnmatchcase(n, t)]
+            if not matched:
+                die(f"glob {t!r} matched no registered channels")
+            for n in matched:
+                if n not in seen:
+                    seen.add(n)
+                    result.append(n)
+        else:
+            if t not in seen:
+                seen.add(t)
+                result.append(t)
+    return result
 
 
 def _files_for_channel(output_dir: Path, channel_id: str) -> list[Path]:
@@ -1101,7 +1134,8 @@ def cmd_merge(cfg: dict, config_path: Path, targets: list[str],
     if not channels:
         die("no channels registered")
 
-    requested = targets or list(channels.keys())
+    requested = (_expand_channel_targets(targets, channels)
+                 if targets else list(channels.keys()))
     failed: list[str] = []
     touched = 0
 
