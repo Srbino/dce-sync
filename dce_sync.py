@@ -263,11 +263,15 @@ def _build_export_cmd(dce: str, token: str, cid: str, output_dir: Path,
 
 
 def _run_export(name: str, cmd: list[str], token: str, print_lock: threading.Lock,
-                prefix_lines: bool) -> int:
+                prefix_lines: bool, quiet: bool = False) -> int:
     """Run a single export. When `prefix_lines` is True, capture stdout/stderr
     and write each line prefixed with the channel name (used for parallel
     runs). Otherwise stream straight to the terminal so DCE.Cli's progress
-    indicator stays interactive."""
+    indicator stays interactive. In `quiet` mode we discard subprocess output
+    entirely so a cron-driven sync stays silent on success."""
+    if quiet:
+        return subprocess.call(cmd, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
     if not prefix_lines:
         return subprocess.call(cmd)
 
@@ -370,7 +374,7 @@ class _ProgressTracker:
 
 def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
              targets: list[str], dry_run: bool, jobs: int,
-             since: date | None, watch: float) -> int:
+             since: date | None, watch: float, quiet: bool) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -403,7 +407,8 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
         else:
             last = parse_last_after(output_dir, cid)
         if last and last >= today:
-            print(f"  {name}: up to date (last_after={last})", flush=True)
+            if not quiet:
+                print(f"  {name}: up to date (last_after={last})", flush=True)
             continue
         cmd = _build_export_cmd(dce, token, cid, output_dir, last)
 
@@ -417,23 +422,32 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
         return 1 if failed else 0
 
     print_lock = threading.Lock()
-    prefix = jobs > 1
+    prefix = jobs > 1 and not quiet
+    synced = 0
 
     if jobs == 1:
         for name, _cid, cmd, last in queue:
-            print(f"  {name}: exporting (after={last or 'beginning'})...", flush=True)
-            rc = _run_export(name, cmd, token, print_lock, prefix_lines=False)
+            if not quiet:
+                print(f"  {name}: exporting (after={last or 'beginning'})...",
+                      flush=True)
+            rc = _run_export(name, cmd, token, print_lock,
+                             prefix_lines=False, quiet=quiet)
             if rc != 0:
                 print(f"  {name}: FAILED (exit {rc})", file=sys.stderr, flush=True)
                 failed.append(name)
+            else:
+                synced += 1
+        if quiet:
+            print(f"synced {synced}, failed {len(failed)}", flush=True)
         return 1 if failed else 0
 
     # Parallel path: announce all jobs up front, then dispatch.
-    for name, _cid, _cmd, last in queue:
-        print(f"  {name}: queued (after={last or 'beginning'})", flush=True)
+    if not quiet:
+        for name, _cid, _cmd, last in queue:
+            print(f"  {name}: queued (after={last or 'beginning'})", flush=True)
 
     tracker: _ProgressTracker | None = None
-    if watch > 0:
+    if watch > 0 and not quiet:
         tracker = _ProgressTracker(
             output_dir=output_dir,
             channel_ids={name: cid for name, cid, _, _ in queue},
@@ -446,7 +460,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
         if tracker:
             tracker.mark_start(name)
         try:
-            return _run_export(name, cmd, token, print_lock, prefix)
+            return _run_export(name, cmd, token, print_lock, prefix, quiet=quiet)
         finally:
             if tracker:
                 tracker.mark_done(name)
@@ -466,13 +480,17 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
                 continue
             with print_lock:
                 if rc == 0:
-                    print(f"  [{name}] done", flush=True)
+                    synced += 1
+                    if not quiet:
+                        print(f"  [{name}] done", flush=True)
                 else:
                     print(f"  [{name}] FAILED (exit {rc})", file=sys.stderr, flush=True)
                     failed.append(name)
 
     if tracker:
         tracker.stop()
+    if quiet:
+        print(f"synced {synced}, failed {len(failed)}", flush=True)
     return 1 if failed else 0
 
 
@@ -1200,7 +1218,8 @@ commands handled by dce:
   sync [name ...]               incremental sync (default: all)
                                   flags: --dry-run, -j/--jobs N (parallel),
                                          --since 7d|3w|2m|1y (override last_after),
-                                         --watch [SECONDS] (size/delta snapshots)
+                                         --watch [SECONDS] (size/delta snapshots),
+                                         -q/--quiet (cron-friendly; DCE_QUIET=1 env)
   add NAME CHANNEL_ID           add a channel to channels.yaml
   discover --guild GID [...]    list a server's channels, optionally append to channels.yaml
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
@@ -1285,11 +1304,17 @@ def main(argv: list[str] | None = None) -> int:
             help="periodic size/delta snapshot per channel (parallel mode only; "
                  "default off, --watch alone = every 10s)",
         )
+        p.add_argument(
+            "-q", "--quiet", action="store_true",
+            help="suppress per-channel chatter; print only failures and "
+                 "a final `synced N, failed M` summary (also via DCE_QUIET=1)",
+        )
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         since = parse_since(a.since) if a.since else None
+        quiet = a.quiet or bool(os.environ.get("DCE_QUIET"))
         return cmd_sync(cfg, config_path, token, dce, a.channels,
-                        a.dry_run, a.jobs, since, a.watch)
+                        a.dry_run, a.jobs, since, a.watch, quiet)
 
     if cmd == "discover":
         p = argparse.ArgumentParser(prog="dce discover")
