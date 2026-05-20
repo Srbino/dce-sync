@@ -244,22 +244,37 @@ def output_dir_from_cfg(cfg: dict, config_path: Path) -> Path:
     return p
 
 
-def cmd_list(cfg: dict, config_path: Path) -> int:
+def cmd_list(cfg: dict, config_path: Path, as_json: bool) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     channels = cfg.get("channels") or {}
-    if not channels:
-        print("no channels registered. Use `dce add NAME CHANNEL_ID`.")
-        return 0
-    rows = []
+
+    entries: list[tuple[str, str, date | None]] = []
     for name, ch in channels.items():
         cid = str(ch["id"])
         last = parse_last_after(output_dir, cid)
-        rows.append((name, cid, str(last) if last else "(none)"))
-    w_n = max(len(r[0]) for r in rows)
-    w_i = max(len(r[1]) for r in rows)
+        entries.append((name, cid, last))
+
+    if as_json:
+        json.dump({
+            "output_dir": str(output_dir),
+            "channels": [
+                {"name": n, "id": cid,
+                 "last_after": last.isoformat() if last else None}
+                for n, cid, last in entries
+            ],
+        }, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+        return 0
+
+    if not entries:
+        print("no channels registered. Use `dce add NAME CHANNEL_ID`.")
+        return 0
+    w_n = max(len(e[0]) for e in entries)
+    w_i = max(len(e[1]) for e in entries)
     print(f"output_dir: {output_dir}")
-    for n, i, l in rows:
-        print(f"  {n:<{w_n}}  {i:<{w_i}}  last_after={l}")
+    for n, cid, last in entries:
+        last_s = last.isoformat() if last else "(none)"
+        print(f"  {n:<{w_n}}  {cid:<{w_i}}  last_after={last_s}")
     return 0
 
 
@@ -1541,7 +1556,7 @@ usage:
   dce [--config PATH] [--settings PATH] <command> [...]
 
 commands handled by dce:
-  list                          show registered channels and last export date
+  list [--json]                 show registered channels and last export date
   sync [name ...]               incremental sync (default: all)
                                   flags: --dry-run, -j/--jobs N (parallel),
                                          --since 7d|3w|2m|1y (override last_after),
@@ -1620,8 +1635,12 @@ def main(argv: list[str] | None = None) -> int:
     dce = find_dce_binary()
 
     if cmd == "list":
+        p = argparse.ArgumentParser(prog="dce list")
+        p.add_argument("--json", action="store_true", dest="as_json",
+                       help="machine-readable output on stdout")
+        a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
-        return cmd_list(cfg, config_path)
+        return cmd_list(cfg, config_path, a.as_json)
 
     if cmd == "sync":
         p = argparse.ArgumentParser(prog="dce sync")
