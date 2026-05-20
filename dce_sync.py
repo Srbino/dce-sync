@@ -23,8 +23,10 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import csv
+import io
 import json
 import os
+import tarfile
 import re
 import shutil
 import platform
@@ -44,7 +46,8 @@ except ImportError:
 
 
 KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify",
-              "merge", "upgrade-check", "completion", "search", "export-csv"}
+              "merge", "upgrade-check", "completion", "search", "export-csv",
+              "snapshot"}
 
 _DCE_GH_API = "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/latest"
 
@@ -583,6 +586,87 @@ def cmd_verify(cfg: dict, config_path: Path, quick: bool,
         for n, s, d in bad:
             print(f"  {s}: {n}", file=sys.stderr, flush=True)
         return 1
+    return 0
+
+
+def cmd_snapshot(cfg: dict, config_path: Path, output: str | None,
+                 compress: str) -> int:
+    """Bundle channels.yaml + every JSON export + a manifest into a single
+    tar (optionally gzip-compressed) for backup, sharing, or moving between
+    machines. Manifest captures per-channel sizes and file lists so the
+    archive is self-describing without unpacking."""
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    if not output_dir.is_dir():
+        die(f"output_dir does not exist: {output_dir}")
+    channels_cfg = cfg.get("channels") or {}
+
+    if compress not in ("gz", "none"):
+        die("--compress must be one of: gz, none")
+
+    if not output:
+        ext = ".tar.gz" if compress == "gz" else ".tar"
+        output = f"dce-snapshot-{date.today().isoformat()}{ext}"
+    out_path = Path(output).expanduser().resolve()
+
+    # Refuse to write into output_dir (would try to include itself mid-write).
+    try:
+        out_path.relative_to(output_dir.resolve())
+        die(f"snapshot path is inside output_dir; choose elsewhere")
+    except ValueError:
+        pass
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    json_files = sorted(output_dir.glob("*.json"))
+
+    manifest: dict = {
+        "created": datetime.now().isoformat(timespec="seconds"),
+        "host": platform.node() or "",
+        "output_dir": str(output_dir),
+        "file_count": len(json_files),
+        "total_bytes": sum(f.stat().st_size for f in json_files),
+        "channels": {},
+    }
+    for name, ch in channels_cfg.items():
+        cid = str(ch["id"])
+        files = _files_for_channel(output_dir, cid)
+        manifest["channels"][name] = {
+            "id": cid,
+            "files": [f.name for f in files],
+            "size": sum(f.stat().st_size for f in files),
+        }
+
+    mode = "w:gz" if compress == "gz" else "w"
+    print(f"creating {out_path} ({len(json_files)} files, "
+          f"{_human_size(manifest['total_bytes'])} pre-compression)...",
+          flush=True)
+
+    tmp = out_path.with_name(out_path.name + ".tmp")
+    try:
+        with tarfile.open(str(tmp), mode) as tf:
+            manifest_bytes = json.dumps(manifest, indent=2).encode("utf-8")
+            info = tarfile.TarInfo(name="manifest.json")
+            info.size = len(manifest_bytes)
+            info.mtime = int(time.time())
+            info.mode = 0o644
+            tf.addfile(info, io.BytesIO(manifest_bytes))
+
+            if config_path.is_file():
+                tf.add(str(config_path), arcname="channels.yaml")
+
+            for f in json_files:
+                print(f"  + {f.name}", flush=True)
+                tf.add(str(f), arcname=f"exports/{f.name}")
+        os.replace(tmp, out_path)
+    except OSError as e:
+        if tmp.exists():
+            tmp.unlink()
+        die(f"snapshot write failed: {e}")
+
+    size = out_path.stat().st_size
+    ratio = (size / manifest["total_bytes"]) if manifest["total_bytes"] else 0.0
+    print(f"\ncreated {out_path} ({_human_size(size)}, "
+          f"{ratio*100:.1f}% of source)", flush=True)
     return 0
 
 
@@ -1342,6 +1426,8 @@ commands handled by dce:
                                          --author NAME, -n LIMIT, -w WIDTH
   export-csv [name ...]         dump messages to CSV (one row per message)
                                   flags: --from/--to YYYY-MM-DD, -o FILE
+  snapshot                      bundle channels.yaml + all JSONs into a tar.gz
+                                  flags: -o FILE, --compress gz|none
   merge [name ...]              consolidate per-channel `(after X)` files; deduped by msg id
                                   flags: --dry-run, --keep (don't delete source files)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
@@ -1460,6 +1546,15 @@ def main(argv: list[str] | None = None) -> int:
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         return cmd_merge(cfg, config_path, a.channels, a.dry_run, a.keep)
+
+    if cmd == "snapshot":
+        p = argparse.ArgumentParser(prog="dce snapshot")
+        p.add_argument("-o", "--output", default=None,
+                       help="output path (default: ./dce-snapshot-YYYY-MM-DD.tar.gz)")
+        p.add_argument("--compress", choices=("gz", "none"), default="gz")
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path)
+        return cmd_snapshot(cfg, config_path, a.output, a.compress)
 
     if cmd == "export-csv":
         p = argparse.ArgumentParser(prog="dce export-csv")
