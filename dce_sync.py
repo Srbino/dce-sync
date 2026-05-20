@@ -776,7 +776,7 @@ def cmd_search(cfg: dict, config_path: Path, pattern: str,
                targets: list[str], use_regex: bool,
                date_from: str | None, date_to: str | None,
                author_filter: str | None, limit: int,
-               width: int) -> int:
+               width: int, as_json: bool) -> int:
     output_dir = output_dir_from_cfg(cfg, config_path)
     channels_cfg = cfg.get("channels") or {}
     if not channels_cfg:
@@ -823,12 +823,14 @@ def cmd_search(cfg: dict, config_path: Path, pattern: str,
             content = msg.get("content") or ""
             if not content:
                 continue
-            ts = (msg.get("timestamp") or "")[:10]
+            ts_full = msg.get("timestamp") or ""
+            ts = ts_full[:10]
             if date_from and ts < date_from:
                 continue
             if date_to and ts > date_to:
                 continue
-            author = ((msg.get("author") or {}).get("name") or "")
+            author_obj = msg.get("author") or {}
+            author = author_obj.get("name") or ""
             if author_pat and not author_pat.search(author):
                 continue
             if not pat.search(content):
@@ -837,11 +839,25 @@ def cmd_search(cfg: dict, config_path: Path, pattern: str,
             if mid and mid in seen:
                 continue
             seen.add(mid)
-            flat = re.sub(r"\s+", " ", content).strip()
-            if width > 0 and len(flat) > width:
-                flat = flat[:width - 1] + "…"
-            print(f"{ts} | {cname[:12]:<12} | {author[:16]:<16} | {flat}",
-                  flush=True)
+
+            if as_json:
+                record = {
+                    "id": mid,
+                    "timestamp": ts_full,
+                    "channel": cname,
+                    "author_id": author_obj.get("id") or "",
+                    "author_name": author,
+                    "content": content,
+                    "reactions": sum((r.get("count") or 0)
+                                     for r in (msg.get("reactions") or [])),
+                }
+                print(json.dumps(record, ensure_ascii=False), flush=True)
+            else:
+                flat = re.sub(r"\s+", " ", content).strip()
+                if width > 0 and len(flat) > width:
+                    flat = flat[:width - 1] + "…"
+                print(f"{ts} | {cname[:12]:<12} | {author[:16]:<16} | {flat}",
+                      flush=True)
             hits += 1
             if limit and hits >= limit:
                 print(f"\n-- stopped at --limit {limit} --", file=sys.stderr,
@@ -851,7 +867,10 @@ def cmd_search(cfg: dict, config_path: Path, pattern: str,
     if hits == 0:
         print(f"no matches for {pattern!r}", file=sys.stderr, flush=True)
         return 1
-    print(f"\n-- {hits} match(es) --", file=sys.stderr, flush=True)
+    if not as_json:
+        print(f"\n-- {hits} match(es) --", file=sys.stderr, flush=True)
+    else:
+        print(f"-- {hits} match(es) --", file=sys.stderr, flush=True)
     return 0
 
 
@@ -1477,7 +1496,8 @@ commands handled by dce:
   verify [--quick] [--filter R] sanity-check every JSON in output_dir parses
   search PATTERN [name ...]     grep archived messages
                                   flags: --regex, --from/--to YYYY-MM-DD,
-                                         --author NAME, -n LIMIT, -w WIDTH
+                                         --author NAME, -n LIMIT, -w WIDTH,
+                                         --json (JSONL one per match)
   export-csv [name ...]         dump messages to CSV (one row per message)
                                   flags: --from/--to YYYY-MM-DD, -o FILE
   snapshot                      bundle channels.yaml + all JSONs into a tar.gz
@@ -1651,10 +1671,14 @@ def main(argv: list[str] | None = None) -> int:
                        help="stop after N hits (0 = no limit)")
         p.add_argument("-w", "--width", type=int, default=200,
                        help="truncate each content line to N chars (0 = full)")
+        p.add_argument("--json", dest="as_json", action="store_true",
+                       help="emit one JSON object per match (JSONL); "
+                            "content stays unescaped/un-truncated")
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         return cmd_search(cfg, config_path, a.pattern, a.channels, a.regex,
-                          a.date_from, a.date_to, a.author, a.limit, a.width)
+                          a.date_from, a.date_to, a.author, a.limit, a.width,
+                          a.as_json)
 
     if cmd == "verify":
         p = argparse.ArgumentParser(prog="dce verify")
