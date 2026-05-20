@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import csv
 import json
 import os
 import re
@@ -43,7 +44,7 @@ except ImportError:
 
 
 KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify",
-              "merge", "upgrade-check", "completion", "search"}
+              "merge", "upgrade-check", "completion", "search", "export-csv"}
 
 _DCE_GH_API = "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/latest"
 
@@ -558,6 +559,93 @@ def cmd_verify(cfg: dict, config_path: Path, quick: bool,
         print(f"{len(bad)} problem(s):", file=sys.stderr, flush=True)
         for n, s, d in bad:
             print(f"  {s}: {n}", file=sys.stderr, flush=True)
+        return 1
+    return 0
+
+
+_CSV_COLUMNS = [
+    "timestamp", "channel", "author_id", "author_name",
+    "content", "reactions", "reply_to", "attachments",
+]
+
+
+def cmd_export_csv(cfg: dict, config_path: Path, targets: list[str],
+                   date_from: str | None, date_to: str | None,
+                   output_path: str | None) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    channels_cfg = cfg.get("channels") or {}
+    if not channels_cfg:
+        die("no channels registered")
+
+    if not targets:
+        targets = list(channels_cfg.keys())
+    unknown = [n for n in targets if n not in channels_cfg]
+    if unknown:
+        die(f"unknown channel(s): {', '.join(unknown)}")
+
+    if output_path:
+        out_fh = open(output_path, "w", newline="", encoding="utf-8")
+        close_after = True
+    else:
+        out_fh = sys.stdout
+        close_after = False
+
+    rows_written = 0
+    try:
+        writer = csv.writer(out_fh)
+        writer.writerow(_CSV_COLUMNS)
+        for name in targets:
+            cid = str(channels_cfg[name]["id"])
+            files = _files_for_channel(output_dir, cid)
+            if not files:
+                print(f"  warn: no files for {name}", file=sys.stderr, flush=True)
+                continue
+            seen: set[str] = set()
+            for fp in files:
+                try:
+                    with open(fp) as fh:
+                        data = json.load(fh)
+                except (json.JSONDecodeError, OSError) as e:
+                    print(f"  warn: {fp.name}: {e}", file=sys.stderr, flush=True)
+                    continue
+                for msg in data.get("messages") or []:
+                    mid = msg.get("id") or ""
+                    if mid and mid in seen:
+                        continue
+                    seen.add(mid)
+                    ts = msg.get("timestamp") or ""
+                    day = ts[:10]
+                    if date_from and day < date_from:
+                        continue
+                    if date_to and day > date_to:
+                        continue
+                    author = msg.get("author") or {}
+                    content = (msg.get("content") or "").replace("\r", " ").replace("\n", " ")
+                    reactions = sum((r.get("count") or 0)
+                                    for r in (msg.get("reactions") or []))
+                    ref = msg.get("reference") or {}
+                    reply_to = ref.get("messageId") or ""
+                    attachments = len(msg.get("attachments") or [])
+                    writer.writerow([
+                        ts, name,
+                        author.get("id") or "",
+                        author.get("name") or "",
+                        content, reactions, reply_to, attachments,
+                    ])
+                    rows_written += 1
+    finally:
+        if close_after:
+            out_fh.close()
+
+    if output_path:
+        try:
+            size = Path(output_path).stat().st_size
+        except OSError:
+            size = 0
+        print(f"wrote {rows_written:,} rows to {output_path} ({_human_size(size)})",
+              file=sys.stderr, flush=True)
+    elif rows_written == 0:
+        print("no rows matched", file=sys.stderr, flush=True)
         return 1
     return 0
 
@@ -1228,6 +1316,8 @@ commands handled by dce:
   search PATTERN [name ...]     grep archived messages
                                   flags: --regex, --from/--to YYYY-MM-DD,
                                          --author NAME, -n LIMIT, -w WIDTH
+  export-csv [name ...]         dump messages to CSV (one row per message)
+                                  flags: --from/--to YYYY-MM-DD, -o FILE
   merge [name ...]              consolidate per-channel `(after X)` files; deduped by msg id
                                   flags: --dry-run, --keep (don't delete source files)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
@@ -1339,6 +1429,21 @@ def main(argv: list[str] | None = None) -> int:
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         return cmd_merge(cfg, config_path, a.channels, a.dry_run, a.keep)
+
+    if cmd == "export-csv":
+        p = argparse.ArgumentParser(prog="dce export-csv")
+        p.add_argument("channels", nargs="*",
+                       help="channel name(s); default: all registered")
+        p.add_argument("--from", dest="date_from", default=None,
+                       metavar="YYYY-MM-DD")
+        p.add_argument("--to", dest="date_to", default=None,
+                       metavar="YYYY-MM-DD")
+        p.add_argument("-o", "--output", default=None,
+                       help="output file (default: stdout)")
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path)
+        return cmd_export_csv(cfg, config_path, a.channels,
+                              a.date_from, a.date_to, a.output)
 
     if cmd == "search":
         p = argparse.ArgumentParser(prog="dce search")
