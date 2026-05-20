@@ -214,18 +214,26 @@ def save_config(path: Path, cfg: dict) -> None:
     path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
 
+_AFTER_MARKER_RX = re.compile(
+    r"\(after (\d{4}-\d{2}-\d{2})\)"
+    r"(?:\s+\(pulled \d{4}-\d{2}-\d{2}\))?"
+    r"\.json$",
+    re.I,
+)
+
+
 def parse_last_after(output_dir: Path, channel_id: str) -> date | None:
-    """Scan existing JSON exports for the latest `(after YYYY-MM-DD)` marker for
-    this channel. Channel ID is matched in the filename, which is how
-    DiscordChatExporter names files."""
+    """Scan existing JSON exports for the latest `(after YYYY-MM-DD)` marker
+    for this channel. Matches both DCE.Cli's native naming and the post-stamp
+    `(after X) (pulled Y).json` form `dce sync` writes after a successful
+    export."""
     if not output_dir.is_dir():
         return None
-    pattern = re.compile(r"\(after (\d{4}-\d{2}-\d{2})\)\.json$", re.I)
     latest: date | None = None
     for f in output_dir.iterdir():
         if channel_id not in f.name:
             continue
-        m = pattern.search(f.name)
+        m = _AFTER_MARKER_RX.search(f.name)
         if not m:
             continue
         try:
@@ -235,6 +243,32 @@ def parse_last_after(output_dir: Path, channel_id: str) -> date | None:
         if latest is None or d > latest:
             latest = d
     return latest
+
+
+def _stamp_pulled_date(output_dir: Path, channel_id: str,
+                       pulled: date) -> None:
+    """After DCE.Cli writes its export, rename the newest file for this
+    channel to add a `(pulled YYYY-MM-DD)` suffix. Each calendar day produces
+    at most one file per channel (intra-day re-sync overwrites that day's
+    snapshot), so the archive grows linearly with days of activity, not with
+    sync count."""
+    candidates = [
+        f for f in output_dir.iterdir()
+        if f.is_file() and f.suffix.lower() == ".json"
+        and channel_id in f.name
+    ]
+    if not candidates:
+        return
+    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    if "(pulled " in newest.name:
+        return  # already stamped
+    stamp = f" (pulled {pulled.isoformat()}).json"
+    new_name = re.sub(r"\.json$", stamp, newest.name)
+    target = newest.with_name(new_name)
+    if target.exists() and target != newest:
+        # Same-day re-sync: replace the older snapshot of this day.
+        target.unlink()
+    newest.rename(target)
 
 
 def output_dir_from_cfg(cfg: dict, config_path: Path) -> Path:
@@ -513,7 +547,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
     synced = 0
 
     if jobs == 1:
-        for name, _cid, cmd, last in queue:
+        for name, cid, cmd, last in queue:
             if not quiet:
                 print(f"  {name}: exporting (after={last or 'beginning'})...",
                       flush=True)
@@ -523,6 +557,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
                 print(f"  {name}: FAILED (exit {rc})", file=sys.stderr, flush=True)
                 failed.append(name)
             else:
+                _stamp_pulled_date(output_dir, cid, today)
                 synced += 1
         if quiet:
             print(f"synced {synced}, failed {len(failed)}", flush=True)
@@ -566,6 +601,9 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
                 print(f"  [{name}] EXCEPTION: {e}", file=sys.stderr)
                 failed.append(name)
                 continue
+            if rc == 0:
+                cid = next(c for n, c, _, _ in queue if n == name)
+                _stamp_pulled_date(output_dir, cid, today)
             with print_lock:
                 if rc == 0:
                     synced += 1
@@ -1107,7 +1145,12 @@ def cmd_stats(cfg: dict, config_path: Path, fast: bool, as_json: bool) -> int:
     return 0
 
 
-_AFTER_RX = re.compile(r"(?P<prefix>.*) \(after (?P<date>\d{4}-\d{2}-\d{2})\)(?P<ext>\.json)$", re.I)
+_AFTER_RX = re.compile(
+    r"(?P<prefix>.*) \(after (?P<date>\d{4}-\d{2}-\d{2})\)"
+    r"(?P<pulled>\s+\(pulled \d{4}-\d{2}-\d{2}\))?"
+    r"(?P<ext>\.json)$",
+    re.I,
+)
 
 
 def _pick_merge_target(files: list[Path]) -> Path:
