@@ -43,7 +43,7 @@ except ImportError:
 
 
 KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify",
-              "merge", "upgrade-check", "completion"}
+              "merge", "upgrade-check", "completion", "search"}
 
 _DCE_GH_API = "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/latest"
 
@@ -541,6 +541,89 @@ def cmd_verify(cfg: dict, config_path: Path, quick: bool,
         for n, s, d in bad:
             print(f"  {s}: {n}", file=sys.stderr, flush=True)
         return 1
+    return 0
+
+
+def cmd_search(cfg: dict, config_path: Path, pattern: str,
+               targets: list[str], use_regex: bool,
+               date_from: str | None, date_to: str | None,
+               author_filter: str | None, limit: int,
+               width: int) -> int:
+    output_dir = output_dir_from_cfg(cfg, config_path)
+    channels_cfg = cfg.get("channels") or {}
+    if not channels_cfg:
+        die("no channels registered")
+
+    if targets:
+        unknown = [n for n in targets if n not in channels_cfg]
+        if unknown:
+            die(f"unknown channel(s): {', '.join(unknown)}")
+        allowed = {str(channels_cfg[n]["id"]): n for n in targets}
+    else:
+        allowed = {str(c["id"]): n for n, c in channels_cfg.items()}
+
+    if use_regex:
+        try:
+            pat = re.compile(pattern, re.I)
+        except re.error as e:
+            die(f"bad regex: {e}")
+    else:
+        pat = re.compile(re.escape(pattern), re.I)
+    author_pat = re.compile(re.escape(author_filter), re.I) if author_filter else None
+
+    files: list[tuple[Path, str]] = []
+    if output_dir.is_dir():
+        for fp in sorted(output_dir.glob("*.json")):
+            for cid in allowed:
+                if cid in fp.name:
+                    files.append((fp, cid))
+                    break
+    if not files:
+        die("no archived JSON files found")
+
+    hits = 0
+    seen: set[str] = set()  # dedupe across overlapping exports by message id
+    for fp, cid in files:
+        cname = allowed[cid]
+        try:
+            with open(fp) as fh:
+                data = json.load(fh)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"  warn: {fp.name}: {e}", file=sys.stderr, flush=True)
+            continue
+        for msg in data.get("messages") or []:
+            content = msg.get("content") or ""
+            if not content:
+                continue
+            ts = (msg.get("timestamp") or "")[:10]
+            if date_from and ts < date_from:
+                continue
+            if date_to and ts > date_to:
+                continue
+            author = ((msg.get("author") or {}).get("name") or "")
+            if author_pat and not author_pat.search(author):
+                continue
+            if not pat.search(content):
+                continue
+            mid = msg.get("id") or ""
+            if mid and mid in seen:
+                continue
+            seen.add(mid)
+            flat = re.sub(r"\s+", " ", content).strip()
+            if width > 0 and len(flat) > width:
+                flat = flat[:width - 1] + "…"
+            print(f"{ts} | {cname[:12]:<12} | {author[:16]:<16} | {flat}",
+                  flush=True)
+            hits += 1
+            if limit and hits >= limit:
+                print(f"\n-- stopped at --limit {limit} --", file=sys.stderr,
+                      flush=True)
+                return 0
+
+    if hits == 0:
+        print(f"no matches for {pattern!r}", file=sys.stderr, flush=True)
+        return 1
+    print(f"\n-- {hits} match(es) --", file=sys.stderr, flush=True)
     return 0
 
 
@@ -1123,6 +1206,9 @@ commands handled by dce:
                                   flags: --filter REGEX, --write, --include-threads None|Active|All
   stats [--fast]                per-channel totals (files, msgs, size, date range)
   verify [--quick] [--filter R] sanity-check every JSON in output_dir parses
+  search PATTERN [name ...]     grep archived messages
+                                  flags: --regex, --from/--to YYYY-MM-DD,
+                                         --author NAME, -n LIMIT, -w WIDTH
   merge [name ...]              consolidate per-channel `(after X)` files; deduped by msg id
                                   flags: --dry-run, --keep (don't delete source files)
   token set <TOKEN>             save the Discord token to ~/.config/dce-sync/token (0600)
@@ -1228,6 +1314,28 @@ def main(argv: list[str] | None = None) -> int:
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
         return cmd_merge(cfg, config_path, a.channels, a.dry_run, a.keep)
+
+    if cmd == "search":
+        p = argparse.ArgumentParser(prog="dce search")
+        p.add_argument("pattern", help="substring (default) or regex with --regex")
+        p.add_argument("channels", nargs="*",
+                       help="channel name(s); default: all registered")
+        p.add_argument("--regex", action="store_true",
+                       help="treat pattern as a regular expression")
+        p.add_argument("--from", dest="date_from", default=None,
+                       metavar="YYYY-MM-DD")
+        p.add_argument("--to", dest="date_to", default=None,
+                       metavar="YYYY-MM-DD")
+        p.add_argument("--author", default=None,
+                       help="substring match on author display name")
+        p.add_argument("-n", "--limit", type=int, default=0,
+                       help="stop after N hits (0 = no limit)")
+        p.add_argument("-w", "--width", type=int, default=200,
+                       help="truncate each content line to N chars (0 = full)")
+        a = p.parse_args(sub_argv)
+        cfg = load_config(config_path)
+        return cmd_search(cfg, config_path, a.pattern, a.channels, a.regex,
+                          a.date_from, a.date_to, a.author, a.limit, a.width)
 
     if cmd == "verify":
         p = argparse.ArgumentParser(prog="dce verify")
