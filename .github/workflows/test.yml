@@ -61,7 +61,7 @@ jobs:
       - name: Token mgmt — set / show / age / rm round-trip
         run: |
           dce token set "test-token-1234567890"
-          dce token show | grep -q "len=18"
+          dce token show | grep -q "len=21"
           dce token path | grep -q "dce-sync/token"
           dce token age | grep -q "age:"
           dce token rm
