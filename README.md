@@ -164,6 +164,14 @@ Guild - Channel [123456789] (after 2026-05-11).json
 
 `dce sync` lists `output_dir`, finds the latest `(after YYYY-MM-DD)` marker for each registered channel ID, and reuses that as the new `--after`. The result is a new file each run with no overlap and no manual bookkeeping — and when the per-channel file list gets noisy you can collapse it back to one archive with `dce merge`.
 
+After each successful export, `dce sync` post-renames the file to add a `(pulled YYYY-MM-DD)` suffix:
+
+```
+Guild - Channel [123456789] (after 2026-05-11) (pulled 2026-05-20).json
+```
+
+That way each calendar day produces a separate snapshot (intra-day re-syncs overwrite the day's file), so the archive grows linearly with activity rather than with sync count, and you can answer "what did this channel look like on date X" by opening the file with the matching pulled date. `parse_last_after` reads both stamped and unstamped filenames.
+
 `--since 7d|3w|2m|1y` bypasses this and forces every channel to start from NOW minus the given window. Overlapping data gets deduped by `dce merge` if you care.
 
 ## `channels.yaml`

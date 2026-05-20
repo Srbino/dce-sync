@@ -9,12 +9,26 @@ All notable changes to this project will be documented in this file. Format base
 - `dce status` — composite health snapshot (token age, channel counts, archive size, DCE.Cli version) with `--json`, `--verify`, `--check-updates`. Exits 1 when outdated or any verify check fails, so it drops into a cron `||` branch.
 - `dce list --json` — registry as `{output_dir, channels: [{name, id, last_after}]}`.
 - `dce verify --json` — integrity report as `{output_dir, mode, total, ok, failed_count, files: [{name, size, status, detail}]}`.
-- GitHub Actions smoke test (`.github/workflows/test.yml`) — Python 3.10/3.11/3.12 matrix; checks syntax, import, `--help` covers every subcommand, both completion scripts parse, token round-trip, parser-error formatting, sdist + wheel build.
+- `dce discover --json` — server channel listing as `{guild, filter, include_threads, wrote, channels: [{status, slug, id, raw_name}]}`.
+- `dce sync --until YYYY-MM-DD` — upper bound on the export window; passes `--before` through to DCE.Cli. Composes with `--since` for fixed historic windows.
+- `dce sync -o/--output DIR` — per-run output override (absolute or CWD-relative) without touching `channels.yaml`.
+- `dce sync` post-rename: every successful export gets a `(pulled YYYY-MM-DD)` suffix so daily snapshots persist instead of overwriting in place. `parse_last_after` recognizes both forms; `dce merge` consolidates them.
+- fnmatch globs in channel-name arguments — `dce sync '*pvm*'`, `dce merge '*-pvm'`, `dce search frostbane 'outlands-*'`. Plain names unchanged; an empty glob match is a hard error.
+- `dce completion fish` — third shell, same shape as zsh/bash with dynamic channel-name completion.
+- `dce token age [--max-days N]` — rotation reminder; exits 1 when the saved token is older than the cap.
+- `tests/` directory with a pytest suite covering `parse_last_after`, `_stamp_pulled_date`, `_AFTER_RX`, `_expand_channel_targets`, and `parse_since` / `parse_until` parsers. CI installs `.[dev]` and runs `pytest -q tests/` on each push.
+- GitHub Actions smoke test (`.github/workflows/test.yml`) — Python 3.10/3.11/3.12 matrix; checks syntax, import, `--help` covers every subcommand, all three completion scripts parse, token round-trip, parser-error formatting, sdist + wheel build, pytest suite.
 - README CI badge and `dce status` / `--until` examples.
+
+### Fixed
+
+- CI workflow token-length assertion was `len=18` against a 21-char fixture; corrected so the smoke test stops failing on its own assumption rather than the code.
+- `.gitignore` now covers `*.egg-info/`, `build/`, `dist/`, and `.pytest_cache/` so editable installs don't leak build artifacts into the tree.
 
 ### Internal
 
 - `_installed_dce_version` and `_latest_dce_version` extracted from `cmd_upgrade_check` so `dce status` can reuse them with silent (None on error) semantics while `upgrade-check` keeps its loud `die()` path.
+- `_AFTER_MARKER_RX` and `_AFTER_RX` (merge target) gain an optional `(pulled YYYY-MM-DD)` group so both stamped and unstamped files coexist in the registry.
 
 ## [0.1.0] - 2026-05-20
 
