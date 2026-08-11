@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!--
+    Outlands Discord export — desktop icon.
+
+    Same visual language as the Outlands Vendor / Wardrobe launchers: a 512²
+    squircle with a teal-900 → zinc-950 diagonal gradient, a zinc-700 hairline
+    and a flat teal-400 glyph at 58% of the tile.
+
+    The glyph is game-icons' `chat-bubble` (CC BY 3.0, Lorc — game-icons.net)
+    with a download arrow knocked out of its disc via a mask, so the arrow reads
+    as the gradient behind it rather than as a second colour. Disc centre is
+    (257, 175), measured off the path rather than eyeballed.
+  -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#134e4a"/>
+      <stop offset="100%" stop-color="#09090b"/>
+    </linearGradient>
+    <mask id="glyph">
+      <path fill="#fff" d="M229.7 22.66A155.2 235.6 80.24 0 0 23.81 215.6A155.2 235.6 80.24 0 0 236.7 333.4c23.8 55.6-17.1 109.3-83.6 161.1c86.2-28.3 176.2-94.4 179.7-178.7a155.2 235.6 80.24 0 0 155.4-180.1A155.2 235.6 80.24 0 0 229.7 22.66"/>
+      <path fill="#000" d="M223.4 82.5h67.2v96.2h46.4L257 267.5L177 178.7h46.4z"/>
+    </mask>
+  </defs>
+  <rect x="4" y="4" width="504" height="504" rx="140" fill="url(#tile)" stroke="#3f3f46" stroke-width="8"/>
+  <g transform="translate(107.52 107.52) scale(0.578125)">
+    <rect width="512" height="512" fill="#2dd4bf" mask="url(#glyph)"/>
+  </g>
+</svg>

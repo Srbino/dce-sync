@@ -205,6 +205,19 @@ dce exportguild -g 290936867199909888 -f Json -o ./
 
 If you pass `-t` explicitly, the wrapper won't add a second one.
 
+## Desktop launcher (macOS)
+
+For the days you'd rather click than type. `./desktop/install-app.sh` puts an
+`Outlands Discord.app` on the Desktop; double-clicking it opens Terminal, prints
+a read-only overview (archive path and size, token age, DCE.Cli version, and a
+per-server tree of what is synced through when and what the run will fetch),
+waits for a yes, then syncs the priority Discord first and the backfill after —
+so an aborted run still leaves the channels you care about current. Closes with
+a list of exactly which files are new.
+
+The overview is Czech; the bundle is a shim pointing back at the checkout, so
+pulling the repo changes what the icon does. See [`desktop/README.md`](desktop/README.md).
+
 ## What it deliberately doesn't do
 
 - Doesn't reimplement `DCE.Cli`'s commands one by one — passthrough handles them.

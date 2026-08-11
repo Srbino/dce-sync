@@ -6,6 +6,7 @@ All notable changes to this project will be documented in this file. Format base
 
 ### Added
 
+- `desktop/` — a macOS double-click launcher (`install-app.sh` builds an `.app` bundle pointing back at the checkout, so `git pull` updates what the icon does). A run opens Terminal, prints a read-only Czech pre-flight overview — archive location and size, token age, DCE.Cli version, and a per-server tree of every channel with its synced-through date and what the run will fetch — waits for confirmation, then syncs server by server with the priority Discord first, and closes with a summary of exactly which files are new. `plan_cz.py` reuses `parse_last_after`, so the dates shown are the dates `dce sync` acts on.
 - `dce status` — composite health snapshot (token age, channel counts, archive size, DCE.Cli version) with `--json`, `--verify`, `--check-updates`. Exits 1 when outdated or any verify check fails, so it drops into a cron `||` branch.
 - `dce list --json` — registry as `{output_dir, channels: [{name, id, last_after}]}`.
 - `dce verify --json` — integrity report as `{output_dir, mode, total, ok, failed_count, files: [{name, size, status, detail}]}`.
