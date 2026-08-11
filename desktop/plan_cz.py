@@ -218,6 +218,16 @@ def render(cfg: dict, config_path: Path, priority: str, check_updates: bool) -> 
           f"{plural(len(on_disk), 'soubor', 'soubory', 'souborů')} · "
           f"{_human_size(sum(f.stat().st_size for f in on_disk))}"
           f" — jeden JSON na kanál a dávku{C.off}")
+    # Exports for channels that are no longer registered — a retired server's
+    # archive, typically. Without this line the folder's size looks wildly out
+    # of proportion to the handful of channels the tree lists.
+    ids = {r["id"] for r in rows}
+    orphan = [f for f in on_disk if not any(i in f.name for i in ids)]
+    if orphan:
+        print(f"               {C.dim}z toho {len(orphan)} "
+              f"{plural(len(orphan), 'soubor', 'soubory', 'souborů')} · "
+              f"{_human_size(sum(f.stat().st_size for f in orphan))} mimo registr"
+              f" — archiv, nestahuje se{C.off}")
     print(f"  Registr      {config_path}")
     print(f"  Token        {TOKEN_FILE}")
     print()
@@ -234,7 +244,7 @@ def render(cfg: dict, config_path: Path, priority: str, check_updates: bool) -> 
     for server, group in grouped(rows, priority):
         todo = [r for r in group if r["todo"]]
         tag = (f"  {C.warn}◆ PRIORITA{C.off}" if server.lower() == priority.lower()
-               else f"  {C.dim}◇ starší{C.off}")
+               else f"  {C.dim}◇ potom{C.off}")
         print(f"  {C.bold}{C.teal}{server}{C.off}{tag}"
               f"{C.dim}  ({len(todo)} z {len(group)} k aktualizaci){C.off}")
         for i, r in enumerate(sorted(group, key=lambda r: r["name"])):
