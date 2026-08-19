@@ -214,19 +214,30 @@ def save_config(path: Path, cfg: dict) -> None:
     path.write_text(yaml.safe_dump(cfg, sort_keys=False))
 
 
+# An export's name records both the window we asked for and the day we got it:
+#   `Guild - chan [id] (after 2026-07-21) (pulled 2026-08-13).json`
+# Both halves are optional — a full-history pull has no `(after X)` — so the
+# caller has to reject a match where neither group fired.
 _AFTER_MARKER_RX = re.compile(
-    r"\(after (\d{4}-\d{2}-\d{2})\)"
-    r"(?:\s+\(pulled \d{4}-\d{2}-\d{2}\))?"
+    r"(?:\(after (\d{4}-\d{2}-\d{2})\))?"
+    r"\s*(?:\(pulled (\d{4}-\d{2}-\d{2})\))?"
     r"\.json$",
     re.I,
 )
 
 
 def parse_last_after(output_dir: Path, channel_id: str) -> date | None:
-    """Scan existing JSON exports for the latest `(after YYYY-MM-DD)` marker
-    for this channel. Matches both DCE.Cli's native naming and the post-stamp
-    `(after X) (pulled Y).json` form `dce sync` writes after a successful
-    export."""
+    """The latest point this channel's archive already covers.
+
+    Prefers the `(pulled Y)` stamp over `(after X)`. The file was written on Y
+    and therefore holds every message up to Y, whereas X is merely where that
+    export *began*; resuming from X re-downloads the whole span on every run,
+    which is what this did until it was fixed. A full-history export carries no
+    `(after X)` at all, so its `(pulled Y)` stamp is its only anchor.
+
+    DCE.Cli resolves `--after DATE` to midnight, so resuming from the pulled day
+    re-fetches that day in full and cannot leave a gap.
+    """
     if not output_dir.is_dir():
         return None
     latest: date | None = None
@@ -236,8 +247,11 @@ def parse_last_after(output_dir: Path, channel_id: str) -> date | None:
         m = _AFTER_MARKER_RX.search(f.name)
         if not m:
             continue
+        stamp = m.group(2) or m.group(1)
+        if not stamp:
+            continue  # plain `name.json` — no marker of either kind
         try:
-            d = datetime.strptime(m.group(1), "%Y-%m-%d").date()
+            d = datetime.strptime(stamp, "%Y-%m-%d").date()
         except ValueError:
             continue
         if latest is None or d > latest:
@@ -246,12 +260,20 @@ def parse_last_after(output_dir: Path, channel_id: str) -> date | None:
 
 
 def _stamp_pulled_date(output_dir: Path, channel_id: str,
-                       pulled: date) -> None:
+                       pulled: date, until: date | None = None) -> None:
     """After DCE.Cli writes its export, rename the newest file for this
     channel to add a `(pulled YYYY-MM-DD)` suffix. Each calendar day produces
     at most one file per channel (intra-day re-sync overwrites that day's
     snapshot), so the archive grows linearly with days of activity, not with
-    sync count."""
+    sync count.
+
+    The stamp is what `parse_last_after` resumes from, so it must record how
+    far the export actually reaches — not when it ran. A `--until`-bounded
+    backfill stops at that bound; stamping it with today would advance the
+    anchor past data nobody downloaded and tear a fresh hole in the archive.
+    """
+    if until is not None and until < pulled:
+        pulled = until
     candidates = [
         f for f in output_dir.iterdir()
         if f.is_file() and f.suffix.lower() == ".json"
@@ -557,7 +579,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
                 print(f"  {name}: FAILED (exit {rc})", file=sys.stderr, flush=True)
                 failed.append(name)
             else:
-                _stamp_pulled_date(output_dir, cid, today)
+                _stamp_pulled_date(output_dir, cid, today, until)
                 synced += 1
         if quiet:
             print(f"synced {synced}, failed {len(failed)}", flush=True)
@@ -603,7 +625,7 @@ def cmd_sync(cfg: dict, config_path: Path, token: str, dce: str,
                 continue
             if rc == 0:
                 cid = next(c for n, c, _, _ in queue if n == name)
-                _stamp_pulled_date(output_dir, cid, today)
+                _stamp_pulled_date(output_dir, cid, today, until)
             with print_lock:
                 if rc == 0:
                     synced += 1

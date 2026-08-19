@@ -23,6 +23,8 @@ All notable changes to this project will be documented in this file. Format base
 
 ### Fixed
 
+- **Incremental sync never advanced.** `parse_last_after` read the `(after X)` half of an export's name — where that pull *began* — and fed it straight back as the next `--after`, so the anchor froze on the first window start and every run re-downloaded the entire span since. In a real archive that meant a 55 MB channel pull repeated two days later as 64 MB, ~85% of it already on disk. It now prefers the `(pulled Y)` stamp, which records how far the export actually reached, and accepts a bare `(pulled Y)` so full-history exports stop re-pulling from scratch. `--after` resolves to midnight, so resuming from the pull day re-fetches that day and cannot leave a gap.
+- `_stamp_pulled_date` now stamps `--until` rather than today when the run is bounded. A backfill reaches only as far as its bound; stamping it with today would advance the anchor past data nobody downloaded and tear a fresh hole one run later.
 - CI workflow token-length assertion was `len=18` against a 21-char fixture; corrected so the smoke test stops failing on its own assumption rather than the code.
 - `.gitignore` now covers `*.egg-info/`, `build/`, `dist/`, and `.pytest_cache/` so editable installs don't leak build artifacts into the tree.
 

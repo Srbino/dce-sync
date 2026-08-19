@@ -26,16 +26,34 @@ def test_parse_last_after_legacy_filename(tmp_path: Path) -> None:
     assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 5, 11)
 
 
-def test_parse_last_after_pulled_stamp(tmp_path: Path) -> None:
+def test_parse_last_after_prefers_the_pulled_stamp(tmp_path: Path) -> None:
+    """`after` is where the export began, `pulled` is where it reached. Resuming
+    from `after` re-downloads the whole span every run."""
     _touch(tmp_path / "G - C [123] (after 2026-05-11) (pulled 2026-05-20).json")
-    assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 5, 11)
+    assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 5, 20)
+
+
+def test_parse_last_after_reads_a_bare_pulled_stamp(tmp_path: Path) -> None:
+    """A full-history export has no `(after X)`; its pull date is the only
+    anchor it carries, and without it the channel re-pulls from scratch."""
+    _touch(tmp_path / "G - C [123] (pulled 2026-05-20).json")
+    assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 5, 20)
 
 
 def test_parse_last_after_picks_latest(tmp_path: Path) -> None:
     _touch(tmp_path / "G - C [123] (after 2026-04-01).json")
     _touch(tmp_path / "G - C [123] (after 2026-05-11) (pulled 2026-05-20).json")
     _touch(tmp_path / "G - C [123] (after 2026-03-15).json")
-    assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 5, 11)
+    assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 5, 20)
+
+
+def test_parse_last_after_anchor_advances_across_runs(tmp_path: Path) -> None:
+    """The regression this guards: two consecutive daily pulls of the same
+    window must leave the anchor on the newer pull, not back at the shared
+    `(after X)`."""
+    _touch(tmp_path / "G - C [123] (after 2026-07-21) (pulled 2026-08-11).json")
+    _touch(tmp_path / "G - C [123] (after 2026-07-21) (pulled 2026-08-13).json")
+    assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 8, 13)
 
 
 def test_parse_last_after_other_channel_ignored(tmp_path: Path) -> None:
@@ -180,3 +198,21 @@ def test_parse_until_valid() -> None:
 def test_parse_until_rejects_bad_format() -> None:
     with pytest.raises(SystemExit):
         dce_sync.parse_until("20.5.2026")
+
+
+def test_stamp_uses_until_bound_not_today(tmp_path: Path) -> None:
+    """A `--until` backfill reaches only as far as that bound. Stamping it with
+    today's date would advance the resume anchor past data nobody downloaded,
+    tearing a new hole in the archive one run later."""
+    f = _touch(tmp_path / "G - C [123] (after 2026-06-27).json")
+    dce_sync._stamp_pulled_date(tmp_path, "123", date(2026, 8, 19),
+                                until=date(2026, 7, 22))
+    assert not f.exists()
+    assert (tmp_path / "G - C [123] (after 2026-06-27) (pulled 2026-07-22).json").exists()
+    assert dce_sync.parse_last_after(tmp_path, "123") == date(2026, 7, 22)
+
+
+def test_stamp_uses_today_when_unbounded(tmp_path: Path) -> None:
+    _touch(tmp_path / "G - C [124] (after 2026-06-27).json")
+    dce_sync._stamp_pulled_date(tmp_path, "124", date(2026, 8, 19))
+    assert (tmp_path / "G - C [124] (after 2026-06-27) (pulled 2026-08-19).json").exists()
