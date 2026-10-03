@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dce-sync"
-version = "0.1.0"
-description = "Thin wrapper around DiscordChatExporter.Cli with friendly channel names, parallel sync, dedup-merge, and archive verification."
+version = "0.2.0"
+description = "Local Discord archive dashboard with server discovery, incremental sync, safe merging, and CLI archive tools."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -36,4 +36,8 @@ Issues = "https://github.com/Srbino/dce-sync/issues"
 dce = "dce_sync:main"
 
 [tool.setuptools]
-py-modules = ["dce_sync"]
+py-modules = ["dce_sync", "dce_archive", "dce_dashboard", "dce_discovery"]
+packages = ["dce_ui"]
+
+[tool.setuptools.package-data]
+dce_ui = ["*.html", "*.css", "*.js", "*.svg"]

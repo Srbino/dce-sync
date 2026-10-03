@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.0 — 2026-10-03
+
+- Add the English Discord Archive dashboard (`dce app`) with responsive layouts,
+  server/channel discovery, active and archived thread selection, tracked/archive
+  badges, server icons with fallbacks, and add-and-sync actions.
+- Add individual-channel and server sync controls, live redacted output, measured
+  byte counts, exporter progress estimates, cancellation, and bounded retries.
+- Merge validated exports atomically into server/channel folders, deduplicating
+  message IDs and preserving newer edits and local asset links.
+- Keep CLI archive tools compatible with both flat and organized archives.
+- Add a generic macOS launcher and original icon, plus a single-instance local server.
+- Preserve registry comments when adding channels and back up the original config.
+- Document verified DiscordChatExporter 2.48 capabilities and limitations.
+
+
 All notable changes to this project will be documented in this file. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]

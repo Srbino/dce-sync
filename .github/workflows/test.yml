@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
@@ -38,7 +38,7 @@ jobs:
         run: |
           dce --help > /tmp/help.txt
           for cmd in list sync add discover verify stats merge token \
-                     upgrade-check completion search export-csv snapshot; do
+                     upgrade-check completion search export-csv snapshot app; do
             grep -q -- "$cmd" /tmp/help.txt || (
               echo "missing $cmd in --help" && cat /tmp/help.txt && exit 1
             )
@@ -69,10 +69,15 @@ jobs:
 
       - name: Parsers — bad --since / --until are rejected cleanly
         run: |
-          # Minimal config so cmd_sync gets past load_config and into the parsers.
+          # Parser checks are offline and must not depend on a Discord account.
+          mkdir -p /tmp/dce-ci-bin
+          printf '#!/bin/sh\nexit 0\n' > /tmp/dce-ci-bin/discordchatexporter
+          chmod +x /tmp/dce-ci-bin/discordchatexporter
+          export PATH="/tmp/dce-ci-bin:$PATH"
+          export DCE_TOKEN="ci-placeholder"
           printf 'output_dir: .\nchannels: {}\n' > /tmp/c.yaml
-          dce --config /tmp/c.yaml sync --dry-run --since 3z      2>&1 | grep -q "expected like 7d"
-          dce --config /tmp/c.yaml sync --dry-run --until bad-fmt 2>&1 | grep -q "expected YYYY-MM-DD"
+          (dce --config /tmp/c.yaml sync --dry-run --since 3z 2>&1 || true) | grep -q "expected like 7d"
+          (dce --config /tmp/c.yaml sync --dry-run --until bad-fmt 2>&1 || true) | grep -q "expected YYYY-MM-DD"
 
       - name: Build — sdist + wheel succeed
         run: |

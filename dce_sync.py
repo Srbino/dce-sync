@@ -48,7 +48,7 @@ except ImportError:
 
 KNOWN_CMDS = {"list", "sync", "add", "token", "stats", "discover", "verify",
               "merge", "upgrade-check", "completion", "search", "export-csv",
-              "snapshot", "status"}
+              "snapshot", "status", "app"}
 
 _DCE_GH_API = "https://api.github.com/repos/Tyrrrz/DiscordChatExporter/releases/latest"
 
@@ -241,8 +241,8 @@ def parse_last_after(output_dir: Path, channel_id: str) -> date | None:
     if not output_dir.is_dir():
         return None
     latest: date | None = None
-    for f in output_dir.iterdir():
-        if channel_id not in f.name:
+    for f in export_files(output_dir):
+        if not re.search(r"(?<!\d)" + re.escape(channel_id) + r"(?!\d)", f.name):
             continue
         m = _AFTER_MARKER_RX.search(f.name)
         if not m:
@@ -663,7 +663,7 @@ def cmd_verify(cfg: dict, config_path: Path, quick: bool,
     if not output_dir.is_dir():
         die(f"output_dir does not exist: {output_dir}")
 
-    files = sorted(output_dir.glob("*.json"))
+    files = export_files(output_dir)
     if filter_re:
         pat = re.compile(filter_re, re.I)
         files = [f for f in files if pat.search(f.name)]
@@ -769,7 +769,7 @@ def cmd_snapshot(cfg: dict, config_path: Path, output: str | None,
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    json_files = sorted(output_dir.glob("*.json"))
+    json_files = export_files(output_dir)
 
     manifest: dict = {
         "created": datetime.now().isoformat(timespec="seconds"),
@@ -784,7 +784,7 @@ def cmd_snapshot(cfg: dict, config_path: Path, output: str | None,
         files = _files_for_channel(output_dir, cid)
         manifest["channels"][name] = {
             "id": cid,
-            "files": [f.name for f in files],
+            "files": [str(f.relative_to(output_dir)) for f in files],
             "size": sum(f.stat().st_size for f in files),
         }
 
@@ -808,7 +808,7 @@ def cmd_snapshot(cfg: dict, config_path: Path, output: str | None,
 
             for f in json_files:
                 print(f"  + {f.name}", flush=True)
-                tf.add(str(f), arcname=f"exports/{f.name}")
+                tf.add(str(f), arcname=f"exports/{f.relative_to(output_dir)}")
         os.replace(tmp, out_path)
     except OSError as e:
         if tmp.exists():
@@ -941,7 +941,7 @@ def cmd_search(cfg: dict, config_path: Path, pattern: str,
 
     files: list[tuple[Path, str]] = []
     if output_dir.is_dir():
-        for fp in sorted(output_dir.glob("*.json")):
+        for fp in export_files(output_dir):
             for cid in allowed:
                 if cid in fp.name:
                     files.append((fp, cid))
@@ -1042,12 +1042,19 @@ def _expand_channel_targets(targets: list[str],
     return result
 
 
+def export_files(output_dir: Path) -> list[Path]:
+    """Legacy exports plus organized archives; exclude in-progress downloads."""
+    return sorted(f for f in [*output_dir.glob("*"),
+                              *(output_dir / "archive").rglob("*")]
+                  if f.is_file() and f.suffix.lower() == ".json")
+
+
 def _files_for_channel(output_dir: Path, channel_id: str) -> list[Path]:
     if not output_dir.is_dir():
         return []
     return sorted(
-        f for f in output_dir.iterdir()
-        if f.is_file() and f.suffix.lower() == ".json" and channel_id in f.name
+        f for f in export_files(output_dir)
+        if re.search(r"(?<!\d)" + re.escape(channel_id) + r"(?!\d)", f.name)
     )
 
 
@@ -1176,20 +1183,11 @@ _AFTER_RX = re.compile(
 
 
 def _pick_merge_target(files: list[Path]) -> Path:
-    """Pick the filename for the merged archive: reuse the latest `(after X)`
-    suffix among the inputs so `parse_last_after` continues to work and the
-    next sync resumes from the right point."""
-    latest = None
-    template = files[-1]
-    for fp in files:
-        m = _AFTER_RX.match(fp.name)
-        if not m:
-            continue
-        d = m.group("date")
-        if latest is None or d > latest:
-            latest = d
-            template = fp
-    return template.parent / template.name
+    """Preserve the latest covered date, including organized archive markers."""
+    def covered(path: Path) -> str:
+        match = _AFTER_MARKER_RX.search(path.name)
+        return (match.group(2) or match.group(1) or "") if match else ""
+    return max(files, key=lambda path: (covered(path), path.name))
 
 
 def cmd_merge(cfg: dict, config_path: Path, targets: list[str],
@@ -1608,7 +1606,7 @@ def cmd_status(cfg: dict, config_path: Path, dce: str,
             stale += 1
 
     # Archive footprint via filesystem walk (no JSON parse).
-    files = sorted(output_dir.glob("*.json")) if output_dir.is_dir() else []
+    files = export_files(output_dir) if output_dir.is_dir() else []
     archive_bytes = sum(f.stat().st_size for f in files)
 
     dce_installed = _installed_dce_version(dce)
@@ -1906,6 +1904,7 @@ usage:
   dce [--config PATH] [--settings PATH] <command> [...]
 
 commands handled by dce:
+  app                          open the local responsive dashboard
   list [--json]                 show registered channels and last export date
   sync [name ...]               incremental sync (default: all)
                                   flags: --dry-run, -j/--jobs N (parallel),
@@ -1970,6 +1969,10 @@ def main(argv: list[str] | None = None) -> int:
 
     cmd = rest[0]
     sub_argv = rest[1:]
+
+    if cmd == "app":
+        from dce_dashboard import main as dashboard_main
+        return dashboard_main(["--config", str(config_path), *sub_argv])
 
     # `token` is self-contained — no DCE.Cli or token-loading needed.
     if cmd == "token":
@@ -2061,9 +2064,11 @@ def main(argv: list[str] | None = None) -> int:
             die("--retries must be >= 0")
         if since and until and since >= until:
             die(f"--since resolves to {since}, which is >= --until {until}")
-        return cmd_sync(cfg, config_path, token, dce, a.channels,
-                        a.dry_run, a.jobs, since, a.watch, quiet, a.retries,
-                        until)
+        from dce_archive import archive_lock
+        with archive_lock(output_dir_from_cfg(cfg, config_path)):
+            return cmd_sync(cfg, config_path, token, dce, a.channels,
+                            a.dry_run, a.jobs, since, a.watch, quiet, a.retries,
+                            until)
 
     if cmd == "discover":
         p = argparse.ArgumentParser(prog="dce discover")
@@ -2090,7 +2095,9 @@ def main(argv: list[str] | None = None) -> int:
                        help="don't delete the per-after source files")
         a = p.parse_args(sub_argv)
         cfg = load_config(config_path)
-        return cmd_merge(cfg, config_path, a.channels, a.dry_run, a.keep)
+        from dce_archive import archive_lock
+        with archive_lock(output_dir_from_cfg(cfg, config_path)):
+            return cmd_merge(cfg, config_path, a.channels, a.dry_run, a.keep)
 
     if cmd == "snapshot":
         p = argparse.ArgumentParser(prog="dce snapshot")

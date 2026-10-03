@@ -36,13 +36,13 @@ function loadChromium() {
   }
   throw new Error(
     "playwright not found — set DCE_PLAYWRIGHT_FROM to a project that has it,\n" +
-    "  e.g. DCE_PLAYWRIGHT_FROM=../uo-outlands-vendor-investment node desktop/make-icon.mjs",
+    "  e.g. DCE_PLAYWRIGHT_FROM=/path/to/playwright-project node desktop/make-icon.mjs",
   );
 }
 
 async function rasterise(svg) {
   const chromium = loadChromium();
-  const browser = await chromium.launch();
+  const browser = await chromium.launch(process.env.DCE_CHROMIUM_PATH ? { executablePath: process.env.DCE_CHROMIUM_PATH } : {});
   const page = await browser.newPage();
   const dataUrl = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
   const written = [];
@@ -64,7 +64,7 @@ async function rasterise(svg) {
 
 /** iconutil wants this exact naming; @2x is the double-resolution variant. */
 async function buildIcns(pngs) {
-  const iconset = join(ICONS_DIR, "OutlandsDiscord.iconset");
+  const iconset = join(ICONS_DIR, "DiscordArchive.iconset");
   await mkdir(iconset, { recursive: true });
   const layout = [
     [16, "icon_16x16.png"], [32, "icon_16x16@2x.png"],

@@ -1,17 +1,34 @@
-# dce
+# Discord Archive
 
 [![test](https://github.com/Srbino/dce-sync/actions/workflows/test.yml/badge.svg)](https://github.com/Srbino/dce-sync/actions/workflows/test.yml)
 
-A thin wrapper around [DiscordChatExporter.Cli](https://github.com/Tyrrrz/DiscordChatExporter) that adds the bits the underlying CLI doesn't ship:
+A local, responsive dashboard for **DiscordChatExporter**, with an incremental
+archive manager and the `dce` command-line tools. Browse your servers, choose the
+channels worth keeping, and keep one deduplicated JSON archive per channel.
 
-- **Friendly channel names** via a small `channels.yaml` registry — type `dce sync pvm` instead of `discordchatexporter export -c 529041672999403554 …`.
-- **Persistent token storage** with sensible discovery order so `-t TOKEN` never has to live in shell history.
-- **Smart incremental sync** — parses existing export filenames so `dce sync` only pulls new messages per channel.
-- **Parallel multi-channel sync** with optional periodic size/delta snapshots and retry with exponential backoff.
-- **Local archive tools** — `verify`, `stats`, `merge`, `snapshot`, `search`, `export-csv`, `status`.
-- **Machine-readable output** — `--json` on every informational command (list, stats, search, verify, status) for jq / dashboards / cron pipelines.
+![Discord Archive dashboard — demonstration data](docs/dashboard.png)
 
-Anything `dce` doesn't recognize is forwarded to `DiscordChatExporter.Cli` unchanged (with `-t TOKEN` auto-injected), so the full upstream surface area stays available. No shadow API to maintain.
+- **Browse your Discord servers** and channels without copying IDs. Search by name,
+  see what is already tracked, and include active or archived threads.
+- **Add and sync in one click**, or sync an existing channel, server, or selection.
+- **See what is happening**: queued, downloading, validating, merging, completed,
+  stopped, or failed; actual bytes and redacted exporter output.
+- **Keep archives organized** by server and channel, with safe staging, validation,
+  atomic replacement, and message-ID deduplication.
+- **Run locally** with no frontend build, hosted service, telemetry, or database.
+  The English interface works at desktop and mobile viewport sizes.
+- **Keep using the CLI** for search, statistics, CSV, snapshots, filters and the
+  complete upstream export command surface.
+
+Built for any accessible Discord server. The Python dashboard supports macOS and
+Linux; a macOS desktop launcher is included. Windows is not supported by the
+wrapper's filesystem-locking layer yet. DiscordChatExporter is installed separately.
+
+![Server and channel picker — demonstration data](docs/server-browser.png)
+
+See the [review of DiscordChatExporter 2.48](docs/upstream-capabilities.md) for the
+capabilities we reuse, progress semantics, thread behavior, and current boundaries.
+This is an independent project, not an official Discord product.
 
 ## Install
 
@@ -32,7 +49,7 @@ Anything `dce` doesn't recognize is forwarded to `DiscordChatExporter.Cli` uncha
 #      chmod +x ~/.local/bin/discordchatexporter
 #
 # 2. dce itself.
-git clone <this-repo>
+git clone https://github.com/Srbino/dce-sync.git
 cd dce-sync
 pip install .              # installs the `dce` console script
 # or:  pip install -e .    # editable install for hacking
@@ -50,20 +67,35 @@ dce completion bash > ~/.bash_completion.d/dce
 
 ## Quick start
 
-```sh
-cd /path/to/where/you/want/exports
-cp /path/to/dce-sync/channels.example.yaml channels.yaml
-$EDITOR channels.yaml          # add your channel IDs (or use `dce discover`)
+Install [DiscordChatExporter.Cli](https://github.com/Tyrrrz/DiscordChatExporter/releases/latest)
+and put `discordchatexporter` or `DiscordChatExporter.Cli` on your PATH. Install
+this project with `pip install .` (Python 3.10+), then:
 
-dce token set YOUR_DISCORD_TOKEN   # see "Getting your token" below
-dce list                           # show registry + last-export dates
-dce sync                           # incremental pull (all channels)
+```sh
+mkdir -p ~/DiscordArchive
+cd ~/DiscordArchive
+dce token set YOUR_DISCORD_TOKEN
+dce app
 ```
+
+Click **Add channels**, choose a server, select channels, then **Add & sync now**.
+The first selection creates `channels.yaml`; no registry file is required to start.
+For existing archives, pass `dce --config /path/to/channels.yaml app` instead.
+
+Server icons use Discord CDN metadata where available, with existing export
+metadata and initials as fallbacks. Text channels display their names, emoji and
+channel/thread glyphs. The server picker uses the account associated with your
+saved token, not whichever account happens to be open in a browser tab.
+
+The dashboard uses JSON for its merged archives. HTML/CSV/text exports, attachments,
+filters, DMs, and other engine options remain available through CLI passthrough.
+For forum content, include threads in the picker and select individual posts.
 
 ## Command reference
 
 | Command | Purpose |
 | --- | --- |
+| `dce app` | Open the local English dashboard and server/channel picker. |
 | `dce list [--json]` | Show registered channels and the latest `(after X)` date in `output_dir` for each. |
 | `dce sync [name…]` | Incremental sync. Flags below. |
 | `dce status` | One-shot health snapshot (token age, channels, archive size, DCE.Cli version). `[--json] [--verify] [--check-updates]`. |
@@ -205,23 +237,59 @@ dce exportguild -g 290936867199909888 -f Json -o ./
 
 If you pass `-t` explicitly, the wrapper won't add a second one.
 
-## Desktop launcher (macOS)
+## Local dashboard and desktop app
 
-For the days you'd rather click than type. `./desktop/install-app.sh` puts an
-`Outlands Discord.app` on the Desktop; double-clicking it opens Terminal, prints
-a read-only overview (archive path and size, token age, DCE.Cli version, and a
-per-server tree of what is synced through when and what the run will fetch),
-waits for a yes, then syncs the priority Discord first and the backfill after —
-so an aborted run still leaves the channels you care about current. Closes with
-a list of exactly which files are new.
+```sh
+dce --config /path/to/channels.yaml app
+# Or from this checkout:
+.venv/bin/python dce --config /path/to/channels.yaml app
+./desktop/install-app.sh
+```
 
-The overview is Czech; the bundle is a shim pointing back at the checkout, so
-pulling the repo changes what the icon does. See [`desktop/README.md`](desktop/README.md).
+The desktop icon now opens a responsive English dashboard in your browser, without
+Terminal. It shows per-channel queue/download/merge/success/error states, actual
+bytes written, elapsed time, and redacted exporter output. Percentages appear only
+when the exporter emits them; otherwise progress is indeterminate. The overall
+bar counts completed operations, including failed/stopped channels, with errors
+reported separately. Reopening the icon reuses the running app for that registry.
+
+Choose channels and click **Sync selected** to download and automatically merge,
+or **Organize archive** to consolidate existing files without contacting Discord.
+The dashboard processes channels sequentially (alphabetically by server, or `priority_server` in the registry first) to keep
+memory use and Discord requests bounded. It refreshes even on the same day,
+overlapping the last covered day and deduplicating by message ID. New downloads
+win over older copies of edited messages; deleted messages remain in the archive.
+
+Organized exports live at:
+
+```text
+exports/archive/<server>/<channel> [id]/messages [id] (pulled YYYY-MM-DD).json
+```
+
+Each channel has one JSON containing its complete archived history. A temporary
+`.downloads/` directory holds downloads until validation and atomic commit.
+Invalid JSON, mismatched channel IDs, and messages without IDs prevent merging;
+source exports are removed only after the merged file is safely written.
+Failed downloads remain in `.downloads/` for inspection and are excluded from
+archive tools. Existing local media stays in place and its links are rebased.
+Unregistered channels and unrelated files are left untouched.
+
+The existing CLI commands read both root-level and organized exports, including
+search, stats, verify, CSV, and snapshots. CLI `sync` retains its original behavior;
+automatic organization and same-day refresh are features of the dashboard.
+The dashboard and CLI sync/merge share a filesystem lock against concurrent writes.
+
+The web server binds only to `127.0.0.1`, uses a random access key, and serves no
+external scripts or fonts. Server icons may be fetched from Discord's CDN. Your Discord token is never sent to the browser.
+Closing a browser tab does not stop a download. Use **Stop sync** to stop the current
+export and queued channels; an atomic merge already in progress finishes safely.
+`--no-browser` prints the local URL; `--port N` selects a port (default: automatic).
+See [`desktop/README.md`](desktop/README.md) for launcher details.
 
 ## What it deliberately doesn't do
 
 - Doesn't reimplement `DCE.Cli`'s commands one by one — passthrough handles them.
-- Doesn't call the Discord API directly — keeps the on-disk message format identical to what `DCE.Cli` writes, which means `search` / `merge` / `export-csv` all stay format-compatible with anything else that parses DCE exports.
+- Keeps message downloading in DiscordChatExporter. Only optional server-icon metadata is queried separately; message archives retain the DCE JSON structure.
 - Doesn't write a second copy of your token to disk.
 - Doesn't try to be a search engine — `dce search` is a linear `json.load` across files. For frequent queries against a large archive, feed it into a SQLite+FTS5 indexer; that's a separate tool, not this one.
 

@@ -32,3 +32,9 @@ desktop/icons/
 .vscode/
 .idea/
 .DS_Store
+
+# Local registry backups and in-progress archives
+*.before-dashboard
+.downloads/
+archive/
+.dce-sync.lock

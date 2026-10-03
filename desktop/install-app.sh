@@ -1,17 +1,17 @@
 #!/bin/bash
-# Build (or refresh) the "Outlands Discord.app" launcher on the Desktop.
+# Build (or refresh) the "Discord Archive.app" launcher on the Desktop.
 #
 #   ./desktop/install-app.sh                       # workspace auto-detected
 #   ./desktop/install-app.sh --workspace DIR       # explicit
 #   ./desktop/install-app.sh --dest ~/Applications # somewhere other than Desktop
 #
-# The bundle is a thin shim: it opens Terminal and runs desktop/export.command
+# The bundle is a thin shim: it opens the local browser dashboard
 # straight out of this repo. Nothing is copied in, so `git pull` updates the
 # behaviour of the icon without reinstalling anything.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-NAME="Outlands Discord"
+NAME="Discord Archive"
 DEST="$HOME/Desktop"
 WORKSPACE=""
 
@@ -24,9 +24,9 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-# Default to the sibling checkout that holds the channel registry.
+# Use the current directory or checkout when no workspace is specified.
 if [ -z "$WORKSPACE" ]; then
-  for candidate in "$REPO/../uo-outlands-discord" "$PWD"; do
+  for candidate in "$PWD" "$REPO"; do
     if [ -f "$candidate/channels.yaml" ]; then
       WORKSPACE="$(cd "$candidate" && pwd)"
       break
@@ -34,6 +34,10 @@ if [ -z "$WORKSPACE" ]; then
   done
 fi
 [ -n "$WORKSPACE" ] || { echo "no channels.yaml found — pass --workspace DIR" >&2; exit 1; }
+[ -f "$WORKSPACE/channels.yaml" ] || { echo "no channels.yaml in workspace" >&2; exit 1; }
+WORKSPACE="$(cd "$WORKSPACE" && pwd)"
+printf -v REPO_LITERAL '%q' "$REPO"
+printf -v WORKSPACE_LITERAL '%q' "$WORKSPACE"
 [ -f "$REPO/desktop/icon.icns" ] || { echo "missing desktop/icon.icns (run make-icon.mjs)" >&2; exit 1; }
 
 APP="$DEST/$NAME.app"
@@ -48,9 +52,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <dict>
   <key>CFBundleName</key><string>$NAME</string>
   <key>CFBundleDisplayName</key><string>$NAME</string>
-  <key>CFBundleIdentifier</key><string>cz.srbino.outlands-discord.launcher</string>
-  <key>CFBundleVersion</key><string>1.0</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleIdentifier</key><string>io.github.srbino.discord-archive</string>
+  <key>CFBundleVersion</key><string>0.2.0</string>
+  <key>CFBundleShortVersionString</key><string>0.2.0</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>launcher</string>
   <key>CFBundleIconFile</key><string>icon</string>
@@ -59,38 +63,21 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# The shim hands the real work to Terminal so the sync is visible and
-# interruptible with Ctrl-C, rather than hidden in a background process.
+# Open the local dashboard without a Terminal window.
 cat > "$APP/Contents/MacOS/launcher" <<LAUNCHER
 #!/bin/bash
-REPO="$REPO"
-WORKSPACE="$WORKSPACE"
-
-if [ ! -d "\$REPO" ] || [ ! -d "\$WORKSPACE" ]; then
-  osascript -e 'display alert "Outlands Discord" message "Nenašel jsem projekt ani složku s exporty.\n\nJe připojený disk SSD 990 PRO?" as critical'
+export PATH="\$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:\$PATH"
+REPO=$REPO_LITERAL
+WORKSPACE=$WORKSPACE_LITERAL
+if [ ! -d "\$REPO" ] || [ ! -f "\$WORKSPACE/channels.yaml" ]; then
+  osascript -e 'display alert "Discord Archive" message "Project or channels.yaml not found. Is the archive drive connected?" as critical'
   exit 1
 fi
-
-# Hold ⌥ while launching for a verbose run.
-DEBUG=""
-if osascript -e 'tell application "System Events" to (option key down) of (get properties)' 2>/dev/null | grep -qi true; then
-  DEBUG=" --debug"
-fi
-
-CMD="'\$REPO/desktop/export.command' --workspace '\$WORKSPACE'\$DEBUG"
-
-osascript <<OSA
-tell application "Terminal"
-  activate
-  do script "\$CMD"
-  delay 0.3
-  try
-    set number of columns of front window to 100
-    set number of rows of front window to 42
-    set custom title of front window to "Outlands Discord — export"
-  end try
-end tell
-OSA
+PYTHON="\$REPO/.venv/bin/python"
+[ -x "\$PYTHON" ] || PYTHON=python3
+mkdir -p "\$HOME/Library/Logs/dce-sync"
+cd "\$WORKSPACE" || exit 1
+nohup "\$PYTHON" "\$REPO/dce" --config "\$WORKSPACE/channels.yaml" app >> "\$HOME/Library/Logs/dce-sync/app.log" 2>&1 &
 LAUNCHER
 
 chmod +x "$APP/Contents/MacOS/launcher" "$REPO/desktop/export.command"
