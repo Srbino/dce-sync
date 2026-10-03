@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dce-sync"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local Discord archive dashboard with server discovery, incremental sync, safe merging, and CLI archive tools."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -36,7 +36,7 @@ Issues = "https://github.com/Srbino/dce-sync/issues"
 dce = "dce_sync:main"
 
 [tool.setuptools]
-py-modules = ["dce_sync", "dce_archive", "dce_dashboard", "dce_discovery", "dce_settings", "dce_exports", "dce_versions"]
+py-modules = ["dce_sync", "dce_archive", "dce_dashboard", "dce_discovery", "dce_settings", "dce_exports", "dce_versions", "dce_storage", "dce_schedule"]
 packages = ["dce_ui"]
 
 [tool.setuptools.package-data]

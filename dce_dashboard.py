@@ -30,6 +30,8 @@ from dce_discovery import discover, archived_icons
 import dce_settings
 import dce_exports
 import dce_versions
+import dce_storage
+import dce_schedule
 
 
 class Dashboard:
@@ -46,6 +48,7 @@ class Dashboard:
         self.operation = None
         self.export_options = None
         self.version_status = None
+        self.maintenance = None
         self.error = None
         self.logs = deque(maxlen=200)
         self.catalog = dict(guilds=None, channels={}, threadModes={}, loading=False, loadingGuild=None, error=None)
@@ -64,6 +67,7 @@ class Dashboard:
                                   downloaded=0, percent=None, messages=None, duplicates=0,
                                   detail='Ready', started=None, elapsed=0))
         self.rows.sort(key=lambda r: (r['server'] != self.cfg.get('priority_server'), r['server'], r['name']))
+        self.refresh_rows()
         threading.Thread(target=self.check_engine, daemon=True).start()
 
     def check_engine(self):
@@ -81,7 +85,68 @@ class Dashboard:
         with self.lock:
             return dict(options=dict(self.options), engine=dict(self.engine), token_present=source != 'not configured',
                         token_source=source, token_age_days=age, running=self.running,
-                        output=str(self.output), config=str(self.config), tested_version='2.48')
+                        output=str(self.output), config=str(self.config), tested_version='2.48',
+                        schedule=dce_schedule.load(self.config))
+
+    def library(self):
+        return dict(dce_storage.inventory(self.output, self.cfg.get('channels') or {}), output=str(self.output), layout=self.options['layout'])
+
+    def choose_folder(self):
+        if os.sys.platform != 'darwin':
+            raise ValueError('Enter the destination path below on this platform.')
+        try:
+            result = subprocess.run(['/usr/bin/osascript', '-e', 'POSIX path of (choose folder with prompt "Choose an empty folder for your Discord archive")'],
+                                    capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise ValueError('Folder selection timed out. Try again or enter the path.') from None
+        if result.returncode:
+            return dict(path=None)
+        return dict(path=result.stdout.strip())
+
+    def save_schedule(self, values):
+        with self.lock:
+            if self.running:
+                raise ValueError('Wait for the current operation before changing the schedule.')
+            with archive_lock(self.output):
+                return dce_schedule.save(self.config, values, {r['name'] for r in self.rows})
+
+    def change_storage(self, value, copy_existing):
+        if type(copy_existing) is not bool:
+            raise ValueError('Choose whether to copy the existing archive.')
+        with self.lock:
+            if self.running:
+                raise ValueError('Wait for the current operation before changing folders.')
+            destination = dce_storage.validate_destination(self.output, value)
+            self.running, self.operation, self.error = True, 'relocate', None
+            self.cancel.clear()
+            def worker():
+                try:
+                    with archive_lock(self.output):
+                        self.maintenance = 'Copying and verifying archive…'
+                        cfg = dce_storage.relocate(self.output, self.config, self.cfg, destination, copy_existing, self.cancel,
+                            lambda n,total: setattr(self, 'maintenance', f'Copying and verifying {n}/{total} files'))
+                        with self.lock:
+                            self.cfg, self.output = cfg, destination
+                            self.refresh_rows()
+                    self.maintenance = 'Archive folder updated. The original folder and its version backups were retained.'
+                except Exception as exc:
+                    self.error = str(exc)
+                    self.maintenance = 'Folder change failed; original archive remains active.'
+                finally:
+                    self.running = False
+            threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_rows(self):
+        for row in self.rows:
+            paths = dce._files_for_channel(self.output, row['id'])
+            last = dce.parse_last_after(self.output, row['id'])
+            row.update(files=len(paths), bytes=sum(p.stat().st_size for p in paths), last=last.isoformat() if last else None)
+            if paths:
+                try:
+                    channel = dce_storage.metadata(paths[-1]).get('channel', {})
+                    row.update(category=channel.get('category') or 'Uncategorized', display_name=channel.get('name') or row['display_name'])
+                except (ValueError, OSError):
+                    pass
 
     def open_folder(self, location='archive', channel=None):
         if location not in ('archive', 'reports', 'versions'):
@@ -300,7 +365,7 @@ class Dashboard:
             result = dict(running=self.running, operation=self.operation, error=self.error,
                           output=str(self.output), channels=copy.deepcopy(self.rows), logs=list(self.logs),
                           discovery_loading=self.catalog['loading'], jobs=self.options['jobs'],
-                          version_status=self.version_status)
+                          version_status=self.version_status, maintenance=self.maintenance)
             icons = {g['name']: g.get('icon_url') for g in self.catalog['guilds'] or []}
             for row in result['channels']:
                 row['server_icon'] = icons.get(row['server']) or self.cfg.get('channels', {}).get(row['name'], {}).get('icon_url')
@@ -323,12 +388,12 @@ class Dashboard:
             self.logs.append(dict(time=time.strftime('%H:%M:%S'), channel=name, text=message[-2000:]))
 
     def start(self, operation, selected, export_options=None):
-        if operation not in ('sync', 'organize', 'export', 'snapshot'):
+        if operation not in ('sync', 'organize', 'export', 'snapshot', 'organize_all'):
             raise ValueError('Unknown operation.')
         if not isinstance(selected, list) or not all(isinstance(n, str) for n in selected):
             raise ValueError('Invalid channel selection.')
         names = {r['name'] for r in self.rows}
-        if operation != 'snapshot' and (not selected or not set(selected) <= names):
+        if operation not in ('snapshot', 'organize_all') and (not selected or not set(selected) <= names):
             raise ValueError('Select at least one existing channel.')
         options = dce_exports.validate(export_options) if operation == 'export' else None
         with self.lock:
@@ -336,6 +401,7 @@ class Dashboard:
                 raise ValueError('An operation is already running.')
             self.running, self.operation, self.error = True, operation, None
             self.export_options = options
+            self.maintenance = None
             self.cancel.clear()
             for row in self.rows:
                 row.update(status='queued' if row['name'] in selected else 'idle',
@@ -429,7 +495,7 @@ class Dashboard:
             incoming = None
             pulled = None
             if operation in ('sync', 'export'):
-                parent = self.output / ('reports' if operation == 'export' else '.downloads')
+                parent = dce_storage.report_folder(self.output, dict(self.cfg['channels'][row['name']], name=row['name'], display_name=row['display_name'], category=row.get('category') or self.cfg['channels'][row['name']].get('category'), server=row['server'], id=row['id'])) if operation == 'export' else self.output / '.downloads'
                 parent.mkdir(parents=True, exist_ok=True)
                 stage = parent / f'.partial-{row["id"]}-{uuid4().hex}'
                 stage.mkdir(parents=True)
@@ -445,7 +511,7 @@ class Dashboard:
                         raise ValueError('Exporter produced no output files. See the activity log.')
                     destination = parent / f'{date.today()}-{row["id"]}-{uuid4().hex[:8]}'
                     os.replace(stage, destination)
-                    self.update(row, status='done', percent=100, detail=f'Export saved in reports/{destination.name}')
+                    self.update(row, status='done', percent=100, detail=f'Export saved: {destination.relative_to(self.output)}')
                     self.log(row['name'], row['detail'])
                     return
                 incoming = sorted(stage.glob('*.json'))
@@ -460,7 +526,7 @@ class Dashboard:
                     self.update(row, status='cancelled', detail='Stopped; downloaded data remains in .downloads')
                     return
                 self.update(row, detail='Validating and merging messages')
-                result = consolidate(self.output, row['name'], self.cfg['channels'][row['name']], incoming, pulled)
+                result = consolidate(self.output, row['name'], self.cfg['channels'][row['name']], incoming, pulled, layout=self.options['layout'])
             self.update(row, **result, status='done', detail='Archive saved', percent=100,
                         elapsed=round(time.monotonic() - row['started']) if row['started'] else 0)
             self.log(row['name'], f'Saved {result["messages"]:,} messages · merged {result["duplicates"]:,} duplicates.')
@@ -475,6 +541,36 @@ class Dashboard:
         token = ''
         try:
             with archive_lock(self.output):
+                if operation == 'organize_all':
+                    self.maintenance = 'Saving a recovery version before organizing…'
+                    backup = dce_versions.snapshot(self.output, self.config, self.output.parent / (self.output.name + '-versions'), self.cancel,
+                        lambda n,total: setattr(self, 'maintenance', f'Saving recovery version {n}/{total} files'))
+                    quarantined = dce_storage.isolate_invalid(self.output, self.cancel,
+                        lambda n,total: setattr(self, 'maintenance', f'Validating old exports {n}/{total} files'))
+                    for path in quarantined:
+                        self.log('Recovery', 'Retained unreadable original: ' + path)
+                    plan = self.library()
+                    failures = list(plan['skipped'])
+                    for index, channel in enumerate(plan['channels']):
+                        if self.cancel.is_set():
+                            break
+                        self.maintenance = f'Organizing {index+1}/{len(plan["channels"])} · {channel["display_name"]}'
+                        try:
+                            result = consolidate(self.output, channel['name'], channel, layout=self.options['layout'])
+                            self.log(channel['name'], f'Organized {result["messages"]:,} messages')
+                        except Exception as exc:
+                            failures.append(channel['name'])
+                            self.log(channel['name'], str(exc))
+                    if not self.cancel.is_set():
+                        dce_storage.organize_reports(self.output, plan['channels'])
+                    with self.lock:
+                        self.refresh_rows()
+                    self.maintenance = ('Organization stopped' if self.cancel.is_set() else 'Library organized') + f'. Recovery version: {backup.name}'
+                    if quarantined:
+                        self.maintenance += f'. {len(quarantined)} unreadable originals retained in recovery/unreadable-json.'
+                    if failures:
+                        self.error = f'{len(failures)} items could not be organized and were retained. See the activity log.'
+                    return
                 if operation == 'snapshot':
                     self.version_status = 'Preparing snapshot…'
                     target = dce_versions.snapshot(self.output, self.config, self.output.parent / (self.output.name + '-versions'),
@@ -541,6 +637,8 @@ def make_handler(app, secret):
                 return self.reply(403, {'error': 'Open the app using dce app.'})
             if path == '/api/settings':
                 return self.reply(200, app.settings_snapshot())
+            if path == '/api/library':
+                return self.reply(200, app.library())
             if path == '/api/catalog':
                 return self.reply(200, app.catalog_snapshot())
             if path == '/api/state':
@@ -559,6 +657,12 @@ def make_handler(app, secret):
                     raise ValueError('Request body must be an object.')
                 if self.path == '/api/settings':
                     return self.reply(200, app.save_settings(body.get('options')))
+                elif self.path == '/api/schedule':
+                    return self.reply(200, app.save_schedule(body))
+                elif self.path == '/api/folder/choose':
+                    return self.reply(200, app.choose_folder())
+                elif self.path == '/api/storage':
+                    app.change_storage(body.get('path'), body.get('copy_existing'))
                 elif self.path == '/api/token':
                     return self.reply(200, app.save_token(body.get('token')))
                 elif self.path == '/api/discover':

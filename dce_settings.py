@@ -8,7 +8,7 @@ from pathlib import Path
 import yaml
 
 DEFAULTS = dict(jobs=3, retries=2, media=False, reuse_media=True, utc=False,
-                markdown=True, full_history=False, threads='None')
+                markdown=True, full_history=False, threads='None', layout='server_category')
 
 
 def validate(values):
@@ -23,6 +23,8 @@ def validate(values):
             raise ValueError(f'{name} must be true or false.')
     if result['threads'] not in ('None', 'Active', 'All'):
         raise ValueError('Invalid thread mode.')
+    if result['layout'] not in ('server', 'server_category'):
+        raise ValueError('Invalid archive layout.')
     return result
 
 

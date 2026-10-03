@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.0 — 2026-10-03
+
+- Hide avatar initials after an icon loads, retaining a clean fallback on failure.
+- Add folder selection and verified, non-destructive archive relocation.
+- Add server/category/channel layouts and whole-library organization, including historical channels.
+- Back up before organizing and retain unreadable originals separately for recovery.
+- Group standalone exports into server/category/channel folders.
+- Add opt-in macOS daily sync with channel selection, background execution and last-run status.
+
+
 ## 0.2.0 — 2026-10-03
 
 - Combine a compact channel toolbar with overview cards, a sidebar and mobile activity placement.

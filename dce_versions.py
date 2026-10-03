@@ -29,6 +29,9 @@ def snapshot(output, config, destination, cancel, progress):
     prefs = config.with_name(config.name + '.dashboard.yaml')
     if prefs.is_file():
         sources.append((prefs, 'dashboard.yaml'))
+    schedule = config.with_name(config.name + '.schedule.yaml')
+    if schedule.is_file():
+        sources.append((schedule, 'schedule.yaml'))
     manifest = dict(schema=1, created=datetime.now(timezone.utc).isoformat(), files=[])
     try:
         with temporary.open('xb') as raw:

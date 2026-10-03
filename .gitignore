@@ -43,3 +43,8 @@ archive/
 # Local archive versions
 *-versions/
 archive-*.tar.gz
+
+# Local scheduling preferences and status
+*.schedule.yaml
+*.schedule-state
+*.schedule.log

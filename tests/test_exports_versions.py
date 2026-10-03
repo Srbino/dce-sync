@@ -42,7 +42,7 @@ out=Path(sys.argv[sys.argv.index('-o')+1])
     monkeypatch.setattr(dce_sync, 'find_dce_binary', lambda: str(binary))
     app.run('export', {'chat'})
     assert app.rows[0]['status'] == 'done'
-    assert list((app.output / 'reports').glob('*/*.html'))
+    assert list((app.output / 'reports').rglob('*.html'))
     assert old.read_bytes() == before
     assert dce_sync.parse_last_after(app.output, '123') == date(2026, 1, 1)
     assert dce_sync.export_files(app.output) == [old]

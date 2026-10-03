@@ -43,19 +43,22 @@ workspace/
   exports/
     archive/
       Server name/
-        channel-alias [channel-id]/
-          messages [channel-id] (pulled YYYY-MM-DD).json
+        Category/
+          channel-name [channel-id]/
+            messages [channel-id] (pulled YYYY-MM-DD).json
     media/channel-id/                 # Reusable assets for canonical sync
-    reports/YYYY-MM-DD-channel-id-run/ # Standalone HTML/CSV/text/JSON and media
+    reports/Server/Category/channel [id]/run/ # Standalone HTML/CSV/text/JSON and media
     .downloads/.partial-channel-run/  # Uncommitted downloads
     .dce-sync.lock                     # Exclusive archive writer lock
   exports-versions/
     archive-UTC-timestamp-run.tar.gz   # Explicit immutable snapshots
 ```
 
-Legacy root JSON files remain readable. **Merge only / Organize archive** moves
-and merges selected registered channels into the canonical structure. Untracked
-historic channels and legacy media stay in place. Existing local media links are
+Legacy root JSON files remain readable. **Organize library** first saves a recovery
+version, then merges all recognized exports, including untracked historical
+channels. Unreadable originals are retained under `recovery/unreadable-json/` with
+a validation note. Historical channels are not automatically tracked or scheduled.
+Legacy media stay in place. Existing local media links are
 rebased rather than deleted. Each channel remains its own conversation; messages
 from different channels are never mixed into one JSON file.
 
@@ -172,3 +175,41 @@ filename templates and advanced passthrough flags remain CLI functionality.
 They are not claimed as dashboard controls. The safe graphical path is explicit
 channel selection with isolated per-channel outcomes. Upstream compatibility and
 remaining limitations are documented in [the capability review](upstream-capabilities.md).
+
+## Storage settings and daily automation
+
+Settings offers an absolute archive path and a native macOS folder chooser. The
+new target must be empty and outside the old archive. Copying verifies every file
+with SHA-256 before atomically updating `output_dir` in the registry. Configuration
+comments are preserved. Cancellation or failure keeps the original location
+active and cleans up files created by the failed copy. The original directory
+and its sibling version backups are retained; no automatic deletion follows a
+successful switch. Copying can be disabled to start a separate empty archive.
+
+Choose Server → category → channel (default), or Server → channel. New syncs use
+the chosen layout. Organize library applies it to existing files and removes empty
+old archive directories. Standalone reports are grouped by server/category/channel;
+old self-contained report directories and remote-only HTML are moved safely.
+HTML with local dependencies is retained rather than breaking its links.
+
+Daily schedules are explicit and disabled by default. Choose a local HH:MM time
+and specific tracked channels. On macOS, Save schedule installs one per-workspace
+LaunchAgent, without a token in its arguments or plist. It runs with the saved
+local credential and saved download settings, even if the dashboard is closed.
+When the dashboard is open, the scheduled worker delegates to it so progress is
+visible. An already busy workspace is skipped; it does not start a competing sync.
+Preferences live in `channels.yaml.schedule.yaml`, last-run results in
+`channels.yaml.schedule-state`, and diagnostics in `channels.yaml.schedule.log`.
+A disconnected workspace is skipped without creating a replacement directory.
+
+The schedule follows local system time, requires a logged-in user and a powered-on
+Mac, and a scheduled invocation missed during sleep runs after waking. Power-off
+is not sleep; no catch-up guarantee is made for a powered-off machine. These are
+[Apple's LaunchAgent scheduling semantics](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html).
+Disabling a schedule unloads and removes only this workspace's agent. Saving new
+settings rolls back the previous schedule if registration fails. Linux's built-in
+scheduler integration is not implemented; use the CLI with cron/systemd there.
+
+Recovery versions also include schedule preferences as `schedule.yaml`. Restoring
+these preferences does not install a LaunchAgent automatically: explicitly save
+and enable the schedule in the restored workspace.

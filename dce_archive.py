@@ -36,6 +36,13 @@ def server_name(output: Path, name: str, channel: dict) -> str:
     if channel.get('server'):
         return str(channel['server'])
     for path in dce._files_for_channel(output, str(channel['id'])):
+        try:
+            from dce_storage import metadata
+            guild = metadata(path).get('guild', {}).get('name')
+            if guild:
+                return guild
+        except (OSError, ValueError):
+            pass
         if path.parent.parent.parent.name == 'archive':
             return path.parent.parent.name
         if ' - ' in path.name:
@@ -58,7 +65,7 @@ def _rebase(value, source: Path, destination: Path):
 
 
 def consolidate(output: Path, name: str, channel: dict,
-                incoming: list[Path] | None = None, pulled: date | None = None) -> dict:
+                incoming: list[Path] | None = None, pulled: date | None = None, layout='server') -> dict:
     """Validate every input, commit atomically, then remove redundant JSON only.
 
     A failed parse never removes a source. Incoming data wins duplicate IDs.
@@ -74,7 +81,12 @@ def consolidate(output: Path, name: str, channel: dict,
         return {'messages': 0, 'duplicates': 0, 'files': 0, 'bytes': 0, 'path': None}
     last = dce.parse_last_after(output, cid)
     stamp = max(filter(None, (last, pulled)), default=None)
-    folder = output / 'archive' / safe_name(server_name(output, name, channel)) / f'{safe_name(name)} [{cid}]'
+    from dce_storage import metadata
+    latest = metadata(files[-1]).get('channel', {})
+    folder = output / 'archive' / safe_name(server_name(output, name, channel))
+    if layout == 'server_category':
+        folder /= safe_name(channel.get('category') or latest.get('category') or 'Uncategorized')
+    folder /= f'{safe_name(channel.get("display_name") or latest.get("name") or name)} [{cid}]'
     suffix = f' (pulled {stamp.isoformat()})' if stamp else ''
     target = folder / f'messages [{cid}]{suffix}.json'
     merged, meta, total = {}, {}, 0
@@ -116,6 +128,11 @@ def consolidate(output: Path, name: str, channel: dict,
     for source in files:
         if source.resolve() != target.resolve():
             source.unlink()
+            parent = source.parent
+            while parent != output / 'archive' and output / 'archive' in parent.parents:
+                try: parent.rmdir()
+                except OSError: break
+                parent = parent.parent
     return {'messages': len(merged), 'duplicates': total - len(merged), 'files': 1,
             'bytes': target.stat().st_size, 'path': str(target.relative_to(output)),
             'last': stamp.isoformat() if stamp else None}

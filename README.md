@@ -279,7 +279,7 @@ bar counts completed operations, including failed/stopped channels, with errors
 reported separately. Reopening the icon reuses the running app for that registry.
 
 Choose channels and click **Sync selected** to download and automatically merge,
-or **Organize archive** to consolidate existing files without contacting Discord.
+or **Organize library** to back up and consolidate all local conversations without downloading new messages.
 The dashboard downloads three channels in parallel by default, adjustable from one
 to six in Settings. It queues servers alphabetically, or `priority_server` first,
 and merges large JSON archives one at a time to bound memory use. Discord rate
@@ -339,3 +339,22 @@ The older CLI `snapshot` command remains JSON-only.
 Read the [architecture, storage layout and recovery guide](docs/architecture.md)
 for exact merge semantics, cancellation behavior, versioning and current limits.
 The server picker also includes **Direct messages**, loaded only when selected.
+
+## Storage, organization and daily sync
+
+In **Settings → Storage & organization**, choose where to save your archive using
+a folder picker or an absolute path. Copying is verified before switching folders;
+the original archive and its version backups remain available. Choose either
+**server → category → channel** or **server → channel**.
+
+**Organize library** previews all local conversations, including historical ones.
+It saves a recovery version, isolates unreadable originals under `recovery/`, and
+merges valid JSON exports into the chosen layout. It also groups self-contained
+standalone reports. It never silently adds historical conversations to tracking.
+
+In **Settings → Automatic sync**, enable a daily local time and choose the channels
+to download. On macOS this uses a LaunchAgent and works with the dashboard closed.
+It skips an already busy workspace. Last-run results are shown in Settings.
+Scheduling is disabled until explicitly enabled; on Linux use the CLI with cron
+or systemd. See the [architecture guide](docs/architecture.md) for recovery,
+relocation and scheduling details.
