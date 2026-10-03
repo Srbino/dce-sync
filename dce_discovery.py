@@ -41,8 +41,14 @@ def discover(guild: str | None = None, threads: str = 'None') -> list[dict]:
         binary = dce.find_dce_binary()
     except SystemExit:
         raise ValueError('Missing saved Discord token or DiscordChatExporter.Cli.') from None
+    # Fetch optional metadata first. A second guild request immediately after
+    # the CLI listing hits Discord's route limit and loses otherwise valid icons.
+    # The exporter handles waiting on its own request; metadata never retries 429.
+    icons = guild_icons(token) if guild is None else {}
     command = [binary, 'guilds'] if guild is None else [
         binary, 'channels', '-g', guild, '--include-vc', 'false', '--include-threads', threads]
+    if guild == '@me':
+        command = [binary, 'dm']
     # The token stays in the subprocess environment, never in the browser or logs.
     env = dict(os.environ, DISCORD_TOKEN=token, NO_COLOR='1')
     try:
@@ -62,39 +68,58 @@ def discover(guild: str | None = None, threads: str = 'None') -> list[dict]:
         raise ValueError('Could not load the Discord listing. Check your connection and try again.')
     rows = parse_listing(response.stdout)
     if guild is None:
-        icons = guild_icons(token)
-        return [dict(r, icon_url=icons.get(r['id'])) for r in rows if r['id'] != '0']
+        return [dict(r, icon_url=icons.get(r['id'])) for r in rows if r['id'] != '0'] + [
+            dict(id='@me', name='Direct messages', icon_url=None)]
     for row in rows:
+        if guild == '@me':
+            row.update(category='Direct messages', kind='dm')
+            continue
         category, _, name = row['name'].rpartition(' / ')
         row.update(category=row.get('parent_name') or category or 'Uncategorized', name=name)
     return rows
 
 
-def guild_icons(token: str) -> dict[str, str]:
-    """Optional display metadata. A failed icon lookup never blocks discovery."""
+def _metadata_page(url, authorization):
+    """Use the platform HTTP client when available; keep credentials off argv."""
     import json
+    import shutil
+    import sys
+    from pathlib import Path
     import urllib.error
     import urllib.request
-    icons = {}
-    authorization = token
-    after = '0'
+    # The system TLS stack works consistently with Discord's metadata endpoint;
+    # a Homebrew curl earlier in a desktop launcher's PATH may be rejected.
+    curl = '/usr/bin/curl' if sys.platform == 'darwin' and Path('/usr/bin/curl').exists() else shutil.which('curl')
+    if curl:
+        config = 'url = ' + json.dumps(url) + '\nheader = ' + json.dumps('Authorization: ' + authorization) + '\n'
+        response = subprocess.run([curl, '--disable', '--silent', '--show-error', '--max-time', '12',
+                                   '--config', '-', '--write-out', '\n%{http_code}'],
+                                  input=config, capture_output=True, text=True, timeout=15)
+        body, _, status = response.stdout.rpartition('\n')
+        if response.returncode or not status.isdigit():
+            raise OSError('Metadata request failed')
+        return int(status), json.loads(body) if status == '200' else None
+    request = urllib.request.Request(url, headers={'Authorization': authorization})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            return response.status, json.load(response)
+    except urllib.error.HTTPError as exc:
+        return exc.code, None
+
+
+def guild_icons(token: str) -> dict[str, str]:
+    """Optional display metadata. A failed icon lookup never blocks discovery."""
+    icons, authorization, after = {}, token, '0'
     try:
         for _ in range(10):
             url = f'https://discord.com/api/v10/users/@me/guilds?limit=200&after={after}'
-            request = urllib.request.Request(url, headers={'Authorization': authorization,
-                                                          'User-Agent': 'DiscordArchive (https://github.com/Srbino/dce-sync, 0.2)'})
-            try:
-                response = urllib.request.urlopen(request, timeout=8)
-            except urllib.error.HTTPError as exc:
-                if exc.code != 401 or authorization.startswith('Bot '):
-                    return icons
+            status, guilds = _metadata_page(url, authorization)
+            if status == 401 and not authorization.startswith('Bot '):
                 authorization = 'Bot ' + token
-                request.add_header('Authorization', authorization)
-                response = urllib.request.urlopen(request, timeout=8)
-            with response:
-                guilds = json.load(response)
-            if not isinstance(guilds, list):
-                return icons
+                status, guilds = _metadata_page(url, authorization)
+            # In particular, do not retry or try another transport on a 429.
+            if status != 200 or not isinstance(guilds, list):
+                break
             for guild in guilds:
                 cid, icon = str(guild.get('id', '')), guild.get('icon')
                 if cid.isdigit() and isinstance(icon, str) and re.fullmatch(r'(?:a_)?[a-fA-F0-9]{32}', icon):
@@ -102,7 +127,7 @@ def guild_icons(token: str) -> dict[str, str]:
             if len(guilds) < 200:
                 break
             after = str(max(int(g['id']) for g in guilds))
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, subprocess.TimeoutExpired):
         pass
     return icons
 

@@ -16,14 +16,14 @@ branch is not the compatibility baseline. The existing local installation was
 | Discover accessible servers | `guilds` | Use the saved account, without asking users to paste IDs. |
 | Discover channels and categories | `channels -g ID` | Parse `ID | hierarchical name`; no JSON listing mode is exposed. |
 | Discover threads | `channels --include-threads None/Active/All` | Preserve indented thread IDs and their parent channel. |
-| Direct messages and group DMs | `dm`, `exportdm` | Available through CLI passthrough; intentionally absent from the server picker. |
+| Direct messages and group DMs | `dm`, `exportdm` | Available in the picker under Direct messages; chosen conversations use the same per-channel archive pipeline. |
 | One or multiple channels | `export -c ID...` | The dashboard uses one channel per subprocess for reliable results. |
 | Expand a category | Pass its ID to `export -c` | Category grouping in a UI need not become a new message-fetching implementation. |
 | Entire server or account | `exportguild`, `exportall` | Powerful batch tools, but see partial-failure semantics below. |
-| Formats | `Json`, `HtmlDark`, `HtmlLight`, `Csv`, `PlainText` | Canonical merged archive stays JSON. Other formats remain available via passthrough. |
+| Formats | `Json`, `HtmlDark`, `HtmlLight`, `Csv`, `PlainText` | Canonical merged archive stays JSON. Export selected supports all five formats, separate from the archive. |
 | Time/message boundaries | `--after`, `--before` | Accept dates, timestamps, or message IDs; the engine does not maintain a persistent sync checkpoint. |
 | Threads and forum posts | `--include-threads` | Forums are containers. Their individual threads are exportable channels. |
-| Attachments and assets | `--media`, `--reuse-media`, `--media-dir` | Use the engine's downloader and cache when exposing offline media controls. |
+| Attachments and assets | `--media`, `--reuse-media`, `--media-dir` | Settings exposes media download and reuse with stable per-channel folders. |
 | Hierarchical output paths | `%G`, `%T`, `%C`, `%g`, `%c`, etc. | Native filename templates already exist; merging and safe commits remain wrapper responsibilities. |
 | Partitioning | `--partition 10000` or `--partition 20mb` | Useful for standalone exports; incompatible with a literal one-file archive unless merged afterward. |
 | Filtering | `--filter` | Supports authors, mentions, content types, text, AND/OR/negation and groups. |
@@ -93,8 +93,8 @@ Sources: [ChannelExporter](https://github.com/Tyrrrz/DiscordChatExporter/blob/2.
 `--media` downloads referenced assets; `--reuse-media` requires it. A stable media
 directory is necessary for useful reuse. The engine may keep a remote URL when an
 asset download fails, so even a successful export with media enabled is not proof
-that every attachment is available offline. The dashboard currently archives
-messages and attachment references, not attachment binaries.
+that every attachment is available offline. The dashboard archives messages and attachment references by default. Settings
+can enable asset downloads and reuse in a stable per-channel media folder.
 
 The merge layer rebases existing local asset links when moving an export. Original
 media files remain in place. It never concatenates rendered HTML files: JSON is the
@@ -125,14 +125,15 @@ per-channel identity checks, deduplication, atomic archive updates, and a local 
 
 Incremental overlap captures additions and edits within that overlap. It does not
 refresh all historical edits or reconcile deletions. A full-history refresh is a
-separate operation. A future filtered export must not advance the canonical
-unfiltered archive checkpoint, and a future interrupted-download resume must only
+separate operation. A standalone filtered export does not advance the canonical
+unfiltered archive checkpoint, and interrupted-download resume must only
 advance after validated commit.
 
-The next useful additions are offline-media settings with a stable media folder,
-an archive reader, and explicit full-history/date-range export controls. Scheduling
-can continue to use the existing CLI. They are not advertised as current dashboard
-features.
+The dashboard now exposes offline media, bounded parallelism, retry counts,
+full-history refresh, UTC and Markdown settings. Standalone date-range/format/filter/partition exports and explicit archive versions
+with media are also available. An archive reader and per-message revision browsing
+remain future work. Scheduling continues to use the existing CLI. See the
+[architecture and recovery guide](architecture.md).
 
 ## Release 2.48 versus the installed 2.47.3
 

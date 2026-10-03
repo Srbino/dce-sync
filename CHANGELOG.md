@@ -2,6 +2,21 @@
 
 ## 0.2.0 — 2026-10-03
 
+- Combine a compact channel toolbar with overview cards, a sidebar and mobile activity placement.
+- Add isolated standalone exports with formats, filters, dates, partitioning, locale and ordering.
+- Add explicit full archive versions including media and SHA-256 manifests.
+- Add direct-message discovery and per-channel folder access.
+- Check folder-opening failures and keep frontend assets aligned with the running backend.
+- Document architecture, storage responsibilities and recovery.
+
+- Add Discord-inspired dark/blurple styling, an expandable bottom-left activity
+  log, and animated local connection/work indicators.
+- Add Settings with private token storage and an in-app token guide, connection
+  testing, 1–6 concurrent downloads, retries, media download/reuse, full-history
+  refresh, UTC, Markdown, and default thread discovery options.
+- Resolve real server icons through the platform HTTP client; keep archive and
+  initials fallbacks. Download messages through DiscordChatExporter as before.
+
 - Add the English Discord Archive dashboard (`dce app`) with responsive layouts,
   server/channel discovery, active and archived thread selection, tracked/archive
   badges, server icons with fallbacks, and add-and-sync actions.

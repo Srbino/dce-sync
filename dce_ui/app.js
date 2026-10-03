@@ -11,36 +11,43 @@ function size(n) { if (!n) return '0 B'; const i = Math.min(3, Math.floor(Math.l
 function date(s) { return s ? new Date(s+'T12:00:00').toLocaleDateString('en-US') : 'Not downloaded yet'; }
 async function api(path, body) {
  const response = await fetch('/api/'+path, {method:body ? 'POST':'GET', headers:{'X-DCE-Key':key || '',...(body ? {'Content-Type':'application/json'} : {})}, ...(body ? {body:JSON.stringify(body)} : {}),signal:AbortSignal.timeout(10000)});
- const result = await response.json(); if (!response.ok) throw new Error(result.error || 'Request failed.'); return result;
+ let result; try {result=await response.json();} catch {throw new Error('The local app returned an invalid response. Reopen Discord Archive.');} if (!response.ok) throw new Error(response.status===404 ? 'This app instance is out of date. Close and reopen Discord Archive to load the update.' : result.error || 'Request failed.'); return result;
 }
 function visible() {
  const q = $('search').value.toLocaleLowerCase('en'), filter = $('filter').value;
  return state.channels.filter(r => `${r.name} ${r.display_name || ""} ${r.server}`.toLocaleLowerCase('en').includes(q) && (filter==='all' || (filter==='active' ? ['downloading','merging','queued'].includes(r.status) : r.status===filter)));
 }
 function render() {
+ if($('run-panel'))$('run-panel').hidden=!state.running && !state.operation;
  const rows = state.channels, shown = visible(), active = rows.filter(r=>['downloading','merging'].includes(r.status));
  const done = rows.filter(r=>r.status==='done').length, errors = rows.filter(r=>r.status==='error').length;
  const attempted = rows.filter(r=>r.status!=='idle'), terminal = attempted.filter(r=>['done','error','cancelled'].includes(r.status)).length;
- $('channel-count').textContent = number(rows.length); $('server-count').textContent = `${new Set(rows.map(r=>r.server)).size} servers in this workspace`;
+ $('channel-count').textContent = number(rows.length); $('server-count').textContent = `${new Set(rows.map(r=>r.server)).size} servers`;
  $('total-size').textContent = size(rows.reduce((s,r)=>s+r.bytes,0)); $('file-count').textContent = `${number(rows.reduce((s,r)=>s+r.files,0))} files across tracked channels`;
  $('done-count').textContent = `${done} / ${attempted.length || rows.length}`;
- $('result-count').textContent = errors ? `${errors} channels need attention` : state.running ? 'Sync in progress' : done ? 'Messages safely archived' : 'Ready when you are';
+ $('result-count').textContent = state.operation==='snapshot' ? 'Full archive backup including media' : errors ? `${errors} channels need attention` : state.running ? 'Sync in progress' : done ? 'Messages safely archived' : 'Ready when you are';
  $('download-size').textContent = size(rows.reduce((s,r)=>s+r.downloaded,0));
  $('count-badge').textContent = rows.length;
- $('run-label').textContent = state.running ? `${state.operation==='organize'?'Organizing':'Syncing'} · ${active.map(r=>'#'+r.name).join(', ') || 'Preparing…'} · finished ${terminal}/${attempted.length}` : attempted.length ? `Run finished · ${done} completed · ${errors} errors · ${rows.filter(r=>r.status==='cancelled').length} stopped` : 'Choose channels to start a sync.';
+ $('run-label').textContent = state.running && state.operation==='snapshot' ? state.version_status || 'Preparing snapshot…' : state.running ? `${state.operation==='organize'?'Organizing':state.operation==='export'?'Exporting':'Syncing'} · ${active.map(r=>'#'+r.name).join(', ') || 'Preparing…'} · finished ${terminal}/${attempted.length}` : state.operation==='snapshot' ? state.version_status || 'Snapshot finished' : attempted.length ? `Run finished · ${done} completed · ${errors} errors · ${rows.filter(r=>r.status==='cancelled').length} stopped` : 'Choose channels to start a sync.';
+ $('connection').dataset.status = state.running || state.discovery_loading ? 'busy' : 'ready';
+ $('connection').textContent = state.running ? `${state.operation==='export'?'Exporting':state.operation==='snapshot'?'Saving version':'Syncing'} · ${active.length} active` : state.discovery_loading ? 'Loading Discord…' : 'Connected locally';
+ $('activity-dock').classList.toggle('working',state.running || state.discovery_loading);
+ $('run-panel')?.classList.toggle('has-errors',errors>0 || !!state.error);
+ $('activity-summary').textContent=state.logs.length ? state.logs[state.logs.length-1].text : state.running?'Preparing downloads…':'Ready when you are';
  $('overall-bar').style.width = `${attempted.length ? terminal/attempted.length*100 : 0}%`;
- $('start').disabled = $('organize').disabled = state.running || pending || !selected.size;
+ $('export-open').disabled = $('start').disabled = $('organize').disabled = state.running || pending || !selected.size;
+ $('snapshot').disabled=state.running || pending;$('version-status').textContent=state.version_status || '';
  $('cancel').hidden = !state.running; $('cancel').disabled = pending;
  $('start').textContent = `↓ Sync selected (${selected.size})`;
  $('select-all').disabled = state.running; $('select-all').checked = shown.length>0 && shown.every(r=>selected.has(r.name)); $('select-all').indeterminate = shown.some(r=>selected.has(r.name)) && !shown.every(r=>selected.has(r.name));
  let html = '', server = null;
  for (const r of shown) {
-  if (r.server!==server) { server=r.server; html+=`<div class="server-heading">${avatar(server,r.server_icon)}${esc(server)}<small>${shown.filter(x=>x.server===server).length} channels</small><button class="text-button" data-sync-server="${esc(server)}" ${state.running || pending?"disabled":""}>↓ Sync server</button></div>`; }
+  if (r.server!==server) { server=r.server; html+=`<div class="server-heading">${avatar(server,r.server_icon)}${esc(server)}<small>${shown.filter(x=>x.server===server).length} ${shown.filter(x=>x.server===server).length===1?'channel':'channels'}</small><button class="text-button" data-sync-server="${esc(server)}" ${state.running || pending?"disabled":""}>↓ Sync server</button></div>`; }
   const busy = ['downloading','merging'].includes(r.status);
   const progress = busy || r.status==='done' ? `<div class="progress ${busy && r.percent===null?'indeterminate':''}" role="progressbar" aria-label="${esc(r.name)}" ${r.percent!==null?`aria-valuenow="${r.percent}" aria-valuemin="0" aria-valuemax="100"`:''}><i style="width:${r.percent===null?30:r.percent}%"></i></div>` : '';
-  html+=`<div class="channel"><label class="channel-name"><input type="checkbox" data-channel="${esc(r.name)}" aria-label="Select ${esc(r.name)}" ${selected.has(r.name)?'checked':''} ${state.running?'disabled':''}><span class="hash">#</span><span><strong>${esc(r.display_name || r.name)}</strong><small>${esc(r.id)}</small></span></label><div><span class="status ${r.status}"><span class="status-dot"></span>${labels[r.status]}${busy && r.percent!==null?` · ${r.percent}% estimated`:''}</span>${progress}<div class="detail">${r.status==='downloading'?`${size(r.downloaded)} · ${r.elapsed} s · ${esc(r.detail)}`:esc(r.detail)}</div></div><div class="archive-cell">${size(r.bytes)}<small>${r.messages===null?`${r.files} files`:`${number(r.messages)} messages`}</small></div><div class="date-cell">${date(r.last)}<small>${r.duplicates?`${number(r.duplicates)} duplicates merged`:r.last?'Incremental sync':'Full available history'}</small><button class="text-button channel-sync" data-sync-channel="${esc(r.name)}" ${state.running || pending?'disabled':''}>↓ Sync</button></div></div>`;
+  html+=`<div class="channel"><label class="channel-name"><input type="checkbox" data-channel="${esc(r.name)}" aria-label="Select ${esc(r.name)}" ${selected.has(r.name)?'checked':''} ${state.running?'disabled':''}><span class="hash">#</span><span><strong>${esc(r.display_name || r.name)}</strong><small>${esc(r.id)}</small></span></label><div><span class="status ${r.status}"><span class="status-dot"></span>${labels[r.status]}${busy && r.percent!==null?` · ${r.percent}% estimated`:''}</span>${progress}<div class="detail">${r.status==='downloading'?`${size(r.downloaded)} · ${r.elapsed} s · ${esc(r.detail)}`:esc(r.detail)}</div></div><div class="archive-cell">${size(r.bytes)}<small>${r.messages===null?`${r.files} ${r.files===1?'file':'files'}`:`${number(r.messages)} messages`}</small></div><div class="date-cell">${date(r.last)}<small>${r.duplicates?`${number(r.duplicates)} duplicates merged`:r.last?'Incremental sync':'Full available history'}</small></div><div class="channel-actions"><button class="text-button" data-open-channel="${esc(r.name)}" ${r.files?'':'disabled'}>Open folder</button><button class="text-button channel-sync" data-sync-channel="${esc(r.name)}" ${state.running || pending?'disabled':''}>↓ Sync</button></div></div>`;
  }
- $('channels').innerHTML = html || '<div class="empty">No matching channels. Use Add channels to build your archive.</div>';
+ replaceHtml('channels', html || '<div class="empty">No matching channels. Use Add channels to build your archive.</div>');
  $('output-path').textContent = state.output;
  if (state.error) showError(state.error);
  if ($('server-browser').open) renderCatalog();
@@ -58,8 +65,8 @@ async function action(path, body) {
  try { await api(path,body); await refresh(); } catch(e) {showError(e.message);} finally {pending=false;if(state)render();}
 }
 async function refresh() {
- try {state=await api('state');if(selected===null)selected=new Set(state.channels.map(r=>r.name));$('connection').textContent='● Connected locally';render();}
- catch(e){$('connection').textContent='○ Connection lost';showError(e.message);$('start').disabled=$('organize').disabled=$('cancel').disabled=true;}
+ try {state=await api('state');if(selected===null)selected=new Set(state.channels.map(r=>r.name));render();}
+ catch(e){$('connection').textContent='Connection lost';$('connection').dataset.status='offline';showError(e.message);$('start').disabled=$('organize').disabled=$('cancel').disabled=true;}
 }
 $('channels').addEventListener('change',e=>{if(e.target.dataset.channel){e.target.checked?selected.add(e.target.dataset.channel):selected.delete(e.target.dataset.channel);render();}});
 $('select-all').addEventListener('change',e=>{visible().forEach(r=>e.target.checked?selected.add(r.name):selected.delete(r.name));render();});
@@ -67,8 +74,8 @@ $('search').addEventListener('input',()=>state&&render());$('filter').addEventLi
 $('start').onclick=()=>action('start',{operation:'sync',channels:[...selected]});
 $('organize').onclick=()=>action('start',{operation:'organize',channels:[...selected]});
 $('cancel').onclick=()=>action('cancel',{});$('open').onclick=()=>action('open',{});
-$('toggle-log').onclick=()=>{const hidden=!$('logs').hidden;$('logs').hidden=hidden;$('toggle-log').textContent=hidden?'Show output':'Hide output';$('toggle-log').setAttribute('aria-expanded',String(!hidden));};
-async function poll(){await refresh();if($('server-browser').open)await refreshCatalog();setTimeout(poll,1000);}poll();
+$('toggle-log').onclick=()=>{const hidden=!$('logs').hidden;$('logs').hidden=hidden;$('toggle-log').textContent=hidden?'Expand':'Collapse';$('toggle-log').setAttribute('aria-expanded',String(!hidden));$('activity-dock').classList.toggle('expanded',!hidden);};
+async function poll(){await refresh();if($('server-browser').open || testingConnection)await refreshCatalog();if(testingConnection && catalog && !catalog.loading)finishConnectionTest();setTimeout(poll,state?.running || state?.discovery_loading ? 500 : 1500);}poll();
 
 let catalog = null, activeGuild = null, catalogBusy = false;
 const picked = new Map();
@@ -79,12 +86,15 @@ function avatar(name, url) {
 }
 document.addEventListener('error', event=>{if(event.target.matches?.('.guild-avatar img'))event.target.hidden=true;},true);
 $('channels').addEventListener('click', event=>{
- const button=event.target.closest('button'); if(!button || state.running)return;
+ const button=event.target.closest('button'); if(!button)return;
+ if(button.dataset.openChannel){action('open',{channel:button.dataset.openChannel});return;}
+ if(state.running)return;
  if(button.dataset.syncChannel)action('start',{operation:'sync',channels:[button.dataset.syncChannel]});
  if(button.dataset.syncServer)action('start',{operation:'sync',channels:state.channels.filter(r=>r.server===button.dataset.syncServer).map(r=>r.name)});
 });
 async function openBrowser() {
  $('server-browser').showModal();
+ if(!settingsData){try{settingsData=await api('settings');}catch(error){showError(error.message);}}
  await refreshCatalog();
  if(catalog && catalog.guilds===null && !catalog.loading)await loadCatalog(null);
 }
@@ -100,18 +110,18 @@ async function loadCatalog(guild, refresh=false) {
 }
 function catalogVisible() {
  const query=$('catalog-search').value.toLocaleLowerCase();
- return (catalog?.channels[activeGuild] || []).filter(c=>`${c.name} ${c.category}`.toLocaleLowerCase().includes(query));
+ return (catalog?.channels[activeGuild] || []).filter(c=>`${c.name} ${c.category}`.toLocaleLowerCase().includes(query)).sort((a,b)=>a.category.localeCompare(b.category,'en') || a.name.localeCompare(b.name,'en'));
 }
 function renderCatalog() {
  if(!catalog)return;
  const loading=catalog.loading || catalogBusy;
  const guilds=(catalog.guilds || []).filter(g=>g.name.toLocaleLowerCase().includes($('guild-search').value.toLocaleLowerCase()));
  $('refresh-guilds').disabled=loading;
- $('thread-mode').disabled=loading || !activeGuild;
+ $('thread-mode').disabled=loading || !activeGuild || activeGuild==='@me';
  $('refresh-channels').disabled=loading || !activeGuild;
  if(catalog.error){$('catalog-error').textContent=catalog.error;$('catalog-error').hidden=false;}
  else if(catalog.loading)$('catalog-error').hidden=true;
- $('guild-list').innerHTML=catalog.guilds===null?`<div class="empty">${loading?'Loading your Discord servers…':'Could not load servers. Try Refresh.'}</div>`:guilds.map(g=>`<button class="guild-choice ${g.id===activeGuild?'chosen':''}" data-guild="${esc(g.id)}" ${loading?'disabled':''}>${avatar(g.name,g.icon_url)}<span><strong>${esc(g.name)}</strong><small>${g.tracked?`${g.tracked} tracked`:'Not tracked yet'}</small></span><span class="guild-chevron">›</span></button>`).join('') || '<div class="empty">No matching servers.</div>';
+ replaceHtml('guild-list',catalog.guilds===null?`<div class="empty">${loading?'Loading your Discord servers…':'Could not load servers. Try Refresh.'}</div>`:guilds.map(g=>`<button class="guild-choice ${g.id===activeGuild?'chosen':''}" data-guild="${esc(g.id)}" ${loading?'disabled':''}>${avatar(g.name,g.icon_url)}<span><strong>${esc(g.name)}</strong><small>${g.tracked?`${g.tracked} tracked`:'Not tracked yet'}</small></span><span class="guild-chevron">›</span></button>`).join('') || '<div class="empty">No matching servers.</div>');
  const guild=(catalog.guilds || []).find(g=>g.id===activeGuild);
  $('guild-title').textContent=guild?.name || 'Select a server';
  const rows=catalogVisible();
@@ -123,7 +133,7 @@ function renderCatalog() {
    content+=`<label class="catalog-channel"><input type="checkbox" data-pick="${esc(channel.id)}" ${picked.has(channel.id)?'checked':''} ${catalogBusy?'disabled':''}><span class="hash">${channel.kind==='thread'?'↳':'#'}</span><span class="catalog-channel-name"><strong>${esc(channel.name)}</strong><small>${channel.last?`Last downloaded ${date(channel.last)}`:channel.archived?'Existing archive found':channel.id}</small></span><span class="tracking-badge ${channel.tracked?'tracked':''}">${label}</span></label>`;
   }
  }
- $('catalog-channels').innerHTML=content || `<div class="empty">${!activeGuild?'Pick a server to see its channels.':loading?'Loading channels…':catalog.error?'Could not load channels. Try Refresh.':'No matching channels.'}</div>`;
+ replaceHtml('catalog-channels',content || `<div class="empty">${!activeGuild?'Pick a server to see its channels.':loading?'Loading channels…':catalog.error?'Could not load channels. Try Refresh.':'No matching channels.'}</div>`);
  $('catalog-all').disabled=!rows.length || catalogBusy;
  $('catalog-all').checked=rows.length>0 && rows.every(c=>picked.has(c.id));
  $('catalog-all').indeterminate=rows.some(c=>picked.has(c.id)) && !rows.every(c=>picked.has(c.id));
@@ -139,14 +149,14 @@ async function saveChannels(sync) {
  } catch(error){$('catalog-error').textContent=error.message;$('catalog-error').hidden=false;}
  finally{catalogBusy=false;renderCatalog();}
 }
-$('browse').onclick=$('browse-nav').onclick=openBrowser;
+$('browse').onclick=openBrowser;if($('browse-nav'))$('browse-nav').onclick=openBrowser;
 $('close-browser').onclick=()=>$('server-browser').close();
 $('refresh-guilds').onclick=()=>loadCatalog(null,true);
 $('refresh-channels').onclick=()=>activeGuild&&loadCatalog(activeGuild,true);
 $('guild-search').oninput=$('catalog-search').oninput=renderCatalog;
 $('guild-list').onclick=event=>{
  const button=event.target.closest('[data-guild]');if(!button || button.disabled)return;
- $('thread-mode').value=catalog.threadModes?.[button.dataset.guild] || 'None';
+ $('thread-mode').value=catalog.threadModes?.[button.dataset.guild] || settingsData?.options.threads || 'None';
  activeGuild=button.dataset.guild;$('catalog-search').value='';renderCatalog();loadCatalog(activeGuild);
 };
 $('catalog-channels').onchange=event=>{
@@ -158,3 +168,80 @@ $('catalog-all').onchange=event=>{catalogVisible().forEach(c=>{if(event.target.c
 $('add-only').onclick=()=>saveChannels(false);$('add-sync').onclick=()=>saveChannels(true);
 
 $('thread-mode').onchange=()=>activeGuild&&loadCatalog(activeGuild,true);
+
+
+let settingsData=null, testingConnection=false;
+function replaceHtml(id, html) {
+ const element=$(id);if(element.innerHTML===html)return;
+ const focused=document.activeElement;
+ const focusData=element.contains(focused) ? ['channel','pick','guild'].find(key=>focused.dataset[key]) : null;
+ const focusValue=focusData?focused.dataset[focusData]:null;
+ const scroll=element.scrollTop;element.innerHTML=html;element.scrollTop=scroll;
+ if(focusData)element.querySelector(`[data-${focusData}="${CSS.escape(focusValue)}"]`)?.focus({preventScroll:true});
+}
+async function openSettings(){
+ $('settings-dialog').showModal();$('settings-error').hidden=true;
+ try{
+  settingsData=await api('settings');
+  for(const [name,value] of Object.entries(settingsData.options)){
+   const input=$('setting-'+name);if(!input)continue;
+   if(input.type==='checkbox')input.checked=value;else input.value=String(value);
+  }
+  renderSettings();
+ }catch(error){settingsError(error.message);}
+}
+function renderSettings(){
+ if(!settingsData)return;
+ $('token-status').textContent=settingsData.token_present?'Token configured':'No token configured';
+ $('token-dot').classList.toggle('configured',settingsData.token_present);
+ $('token-source').textContent=`Source: ${settingsData.token_source}${settingsData.token_age_days===null?'':` · saved ${settingsData.token_age_days} days ago`}`;
+ $('engine-version').textContent=settingsData.engine.version;
+ $('settings-output').textContent=settingsData.output;
+ $('save-settings').disabled=$('save-token').disabled=!!state?.running;
+ $('settings-save-note').textContent=state?.running?'Finish or stop the current sync before changing settings.':'Settings apply to your next sync.';
+ $('test-connection').disabled=testingConnection;
+}
+function settingsError(message){$('settings-error').textContent=message;$('settings-error').hidden=false;}
+async function finishConnectionTest(){
+ testingConnection=false;$('test-connection').disabled=false;
+ if(catalog.error){settingsError(catalog.error);$('token-status').textContent='Connection test failed';$('token-dot').classList.remove('configured');}
+ else{$('token-status').textContent=`Connected · ${catalog.guilds?.length || 0} servers available`;$('token-dot').classList.add('configured');$('settings-error').hidden=true;}
+}
+$('settings-open').onclick=openSettings;if($('settings-nav'))$('settings-nav').onclick=openSettings;
+$('close-settings').onclick=()=>{$('discord-token').value='';$('settings-dialog').close();};
+$('settings-dialog').addEventListener('close',()=>{$('discord-token').value='';});
+$('settings-form').onsubmit=async event=>{
+ event.preventDefault();const options={};
+ for(const name of ['jobs','retries'])options[name]=Number($('setting-'+name).value);
+ for(const name of ['media','reuse_media','utc','markdown','full_history'])options[name]=$('setting-'+name).checked;
+ options.threads=$('setting-threads').value;
+ $('save-settings').disabled=true;
+ try{settingsData=await api('settings',{options});$('settings-dialog').close();await refresh();}
+ catch(error){settingsError(error.message);}finally{renderSettings();}
+};
+$('save-token').onclick=async()=>{
+ const input=$('discord-token');$('save-token').disabled=true;$('settings-error').hidden=true;
+ try{settingsData=await api('token',{token:input.value});input.value='';catalog=null;renderSettings();$('token-status').textContent='Token saved · test your connection';}
+ catch(error){settingsError(error.message);}finally{$('save-token').disabled=!!state?.running;}
+};
+$('test-connection').onclick=async()=>{
+ testingConnection=true;$('test-connection').disabled=true;$('token-status').textContent='Checking Discord…';$('settings-error').hidden=true;
+ try{await api('discover',{refresh:true});await refreshCatalog();if(!catalog.loading)finishConnectionTest();}
+ catch(error){testingConnection=false;settingsError(error.message);$('test-connection').disabled=false;}
+};
+
+$('export-open').onclick=()=>{$('export-error').hidden=true;$('export-selection').textContent=`${selected.size} channels selected`;$('export-dialog').showModal();};
+$('export-close').onclick=()=>$('export-dialog').close();
+$('export-form').onsubmit=async event=>{
+ event.preventDefault();const options={};
+ for(const name of ['format','after','before','filter','partition','locale'])options[name]=$('export-'+name).value;
+ options.reverse=$('export-reverse').checked;
+ try{await api('start',{operation:'export',channels:[...selected],options});$('export-dialog').close();await refresh();}
+ catch(error){$('export-error').textContent=error.message;$('export-error').hidden=false;}
+};
+$('snapshot').onclick=()=>action('start',{operation:'snapshot',channels:[]});
+$('versions-open').onclick=()=>action('open',{location:'versions'});
+$('reports-open').onclick=()=>action('open',{location:'reports'});
+const mobileLayout=matchMedia('(max-width:1000px)');
+function placeActivity(){const dock=$('activity-dock');dock.classList.toggle('mobile-activity',mobileLayout.matches);if(mobileLayout.matches)document.querySelector('main').insertBefore(dock,document.querySelector('main footer'));else document.querySelector('.sidebar').append(dock);}
+mobileLayout.addEventListener('change',placeActivity);placeActivity();

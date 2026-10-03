@@ -38,3 +38,8 @@ desktop/icons/
 .downloads/
 archive/
 .dce-sync.lock
+*.dashboard.yaml
+
+# Local archive versions
+*-versions/
+archive-*.tar.gz

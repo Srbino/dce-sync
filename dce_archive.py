@@ -47,7 +47,7 @@ def _rebase(value, source: Path, destination: Path):
     """Keep existing local media links valid after moving the JSON."""
     if isinstance(value, dict):
         for key, item in value.items():
-            if key in {'url', 'proxyUrl', 'iconUrl', 'avatarUrl'} and isinstance(item, str):
+            if (key == 'url' or key.endswith('Url')) and isinstance(item, str):
                 if item and not urlparse(item).scheme and not item.startswith('//'):
                     value[key] = os.path.relpath((source / item).resolve(), destination)
             else:

@@ -36,7 +36,7 @@ Issues = "https://github.com/Srbino/dce-sync/issues"
 dce = "dce_sync:main"
 
 [tool.setuptools]
-py-modules = ["dce_sync", "dce_archive", "dce_dashboard", "dce_discovery"]
+py-modules = ["dce_sync", "dce_archive", "dce_dashboard", "dce_discovery", "dce_settings", "dce_exports", "dce_versions"]
 packages = ["dce_ui"]
 
 [tool.setuptools.package-data]

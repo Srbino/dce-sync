@@ -87,9 +87,34 @@ metadata and initials as fallbacks. Text channels display their names, emoji and
 channel/thread glyphs. The server picker uses the account associated with your
 saved token, not whichever account happens to be open in a browser tab.
 
-The dashboard uses JSON for its merged archives. HTML/CSV/text exports, attachments,
-filters, DMs, and other engine options remain available through CLI passthrough.
+The dashboard uses JSON for its merged archives. HTML/CSV/text exports, filters, DMs, and other engine options remain available
+through CLI passthrough. Attachments and media reuse can be enabled in Settings.
 For forum content, include threads in the picker and select individual posts.
+
+## Settings
+
+Open **Settings** to save a Discord access token, read the in-app token guide, and
+check your connection. This is an Authorization token, not a browser cookie.
+Existing CLI token storage is reused; credentials are never returned through the API.
+
+You can choose 1–6 concurrent downloads, 0–5 retries, attachment/media downloads,
+media reuse, full-history refresh, UTC timestamps, Markdown handling, and the
+default thread discovery mode. Settings are saved beside the registry in
+`channels.yaml.dashboard.yaml`, separate from the token. Incremental sync is the
+default. Downloads respect Discord rate limits; extra concurrency does not promise
+proportional speed improvements.
+
+New media is stored in `exports/media/<channel-id>/`, providing a stable location
+for reuse across runs. Message archives link to those files. Existing media remains
+in place. Upstream can retain a remote URL for an unavailable asset, so successful
+message export does not guarantee every attachment downloaded. The existing
+`snapshot` command bundles JSON exports, not media binaries.
+
+The activity log expands to show exporter output. A green connection
+indicator means the browser is connected to the local app; animated blurple marks
+work in progress. Use **Test connection** in Settings to validate Discord access.
+
+![Connection and archive settings — demonstration data](docs/settings.png)
 
 ## Command reference
 
@@ -255,8 +280,10 @@ reported separately. Reopening the icon reuses the running app for that registry
 
 Choose channels and click **Sync selected** to download and automatically merge,
 or **Organize archive** to consolidate existing files without contacting Discord.
-The dashboard processes channels sequentially (alphabetically by server, or `priority_server` in the registry first) to keep
-memory use and Discord requests bounded. It refreshes even on the same day,
+The dashboard downloads three channels in parallel by default, adjustable from one
+to six in Settings. It queues servers alphabetically, or `priority_server` first,
+and merges large JSON archives one at a time to bound memory use. Discord rate
+limits remain enabled. It refreshes even on the same day,
 overlapping the last covered day and deduplicating by message ID. New downloads
 win over older copies of edited messages; deleted messages remain in the archive.
 
@@ -296,3 +323,19 @@ See [`desktop/README.md`](desktop/README.md) for launcher details.
 ## License
 
 MIT
+
+## Export copies and archive versions
+
+Use **Export selected** for HTML (dark/light), CSV, plain text or JSON, with optional
+date/message boundaries, filters, partitioning, locale and reverse order. These
+outputs are downloaded into `exports/reports/` and never change the merged archive
+or its checkpoint. Media and performance preferences come from Settings.
+
+**Save archive version** creates a separate timestamped backup with downloaded
+media and a SHA-256 manifest in `exports-versions/`. Versions are explicit full
+backups; they are not automatically pruned. **Open versions** opens that folder.
+The older CLI `snapshot` command remains JSON-only.
+
+Read the [architecture, storage layout and recovery guide](docs/architecture.md)
+for exact merge semantics, cancellation behavior, versioning and current limits.
+The server picker also includes **Direct messages**, loaded only when selected.

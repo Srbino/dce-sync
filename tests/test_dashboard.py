@@ -98,7 +98,7 @@ def test_authenticated_http(tmp_path):
     url = f'http://127.0.0.1:{server.server_port}'
     try:
         with urllib.request.urlopen(url) as response:
-            assert b'History worth keeping' in response.read()
+            assert b'id="channels"' in response.read()
         with pytest.raises(urllib.error.HTTPError) as error:
             urllib.request.urlopen(url + '/api/state')
         assert error.value.code == 403

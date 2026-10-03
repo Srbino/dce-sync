@@ -126,7 +126,7 @@ def test_icon_lookup_has_safe_fallback(monkeypatch):
     import urllib.request
     def fail(*args, **kwargs):
         raise OSError('offline')
-    monkeypatch.setattr(urllib.request,'urlopen',fail)
+    monkeypatch.setattr(discovery,'_metadata_page',fail)
     assert discovery.guild_icons('secret') == {}
 
 
@@ -150,3 +150,13 @@ def test_registry_with_four_space_indent(tmp_path):
     app.config.write_text(app.config.read_text().replace('  existing:', '    existing:'))
     assert app.add_channels([{'guild':'10','id':'456'}])['added']==1
     assert yaml.safe_load(app.config.read_text())['channels']['alpha-news']['id']=='456'
+
+
+def test_refresh_keeps_icons_when_optional_metadata_is_rate_limited(tmp_path, monkeypatch):
+    import dce_dashboard
+    app = fixture_app(tmp_path)
+    icon = 'https://cdn.discordapp.com/icons/10/' + 'a' * 32 + '.png?size=64'
+    app.catalog['guilds'][0]['icon_url'] = icon
+    monkeypatch.setattr(dce_dashboard, 'discover', lambda *args: [dict(id='10', name='Alpha', icon_url=None)])
+    app._discover(None, 'None')
+    assert app.catalog_snapshot()['guilds'][0]['icon_url'] == icon

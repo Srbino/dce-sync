@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import concurrent.futures
 import fcntl
 import hashlib
 import json
@@ -26,6 +27,9 @@ from uuid import uuid4
 import dce_sync as dce
 from dce_archive import archive_lock, consolidate, server_name
 from dce_discovery import discover, archived_icons
+import dce_settings
+import dce_exports
+import dce_versions
 
 
 class Dashboard:
@@ -33,10 +37,15 @@ class Dashboard:
         self.config = config
         self.cfg = dce.load_config(config) if config.exists() else {'output_dir': 'exports', 'channels': {}}
         self.output = dce.output_dir_from_cfg(self.cfg, config)
+        self.options = dce_settings.load(config)
+        self.merge_lock = threading.Lock()
+        self.engine = {'installed': False, 'version': 'Checking…', 'path': None}
         self.lock = threading.RLock()
         self.cancel = threading.Event()
         self.running = False
         self.operation = None
+        self.export_options = None
+        self.version_status = None
         self.error = None
         self.logs = deque(maxlen=200)
         self.catalog = dict(guilds=None, channels={}, threadModes={}, loading=False, loadingGuild=None, error=None)
@@ -55,6 +64,68 @@ class Dashboard:
                                   downloaded=0, percent=None, messages=None, duplicates=0,
                                   detail='Ready', started=None, elapsed=0))
         self.rows.sort(key=lambda r: (r['server'] != self.cfg.get('priority_server'), r['server'], r['name']))
+        threading.Thread(target=self.check_engine, daemon=True).start()
+
+    def check_engine(self):
+        binary = shutil.which('discordchatexporter') or shutil.which('DiscordChatExporter.Cli')
+        version = dce._installed_dce_version(binary) if binary else None
+        with self.lock:
+            self.engine = dict(installed=bool(binary), path=binary, version=version or 'Not installed')
+
+    def settings_snapshot(self):
+        token = dce._read_token_file(dce.TOKEN_FILE)
+        source = 'environment' if os.environ.get('DCE_TOKEN') else 'saved file' if token else 'not configured'
+        if source == 'not configured' and dce._read_token_file(Path.cwd() / '.dce_token'):
+            source = 'workspace file'
+        age = max(0, int((time.time() - dce.TOKEN_FILE.stat().st_mtime) / 86400)) if token else None
+        with self.lock:
+            return dict(options=dict(self.options), engine=dict(self.engine), token_present=source != 'not configured',
+                        token_source=source, token_age_days=age, running=self.running,
+                        output=str(self.output), config=str(self.config), tested_version='2.48')
+
+    def open_folder(self, location='archive', channel=None):
+        if location not in ('archive', 'reports', 'versions'):
+            raise ValueError('Unknown archive location.')
+        folder = {'archive': self.output, 'reports': self.output / 'reports',
+                  'versions': self.output.parent / (self.output.name + '-versions')}[location]
+        if channel is not None:
+            row = next((r for r in self.rows if r['name'] == channel), None)
+            if row is None:
+                raise ValueError('Unknown channel.')
+            exports = dce._files_for_channel(self.output, row['id'])
+            if not exports:
+                raise ValueError('This channel has not been downloaded yet.')
+            folder = exports[0].parent
+        folder.mkdir(parents=True, exist_ok=True)
+        opener = '/usr/bin/open' if os.sys.platform == 'darwin' else shutil.which('xdg-open')
+        if not opener:
+            raise ValueError(f'No desktop folder opener is available. Archive location: {folder}')
+        try:
+            result = subprocess.run([opener, str(folder)], capture_output=True, text=True, timeout=8)
+        except subprocess.TimeoutExpired:
+            raise ValueError(f'The file manager did not respond. Open this folder manually: {folder}') from None
+        if result.returncode:
+            raise ValueError(f'Could not open the file manager. Archive location: {folder}')
+        return {'ok': True, 'path': str(folder)}
+
+    def save_settings(self, values):
+        with self.lock:
+            if self.running:
+                raise ValueError('Stop the current sync before changing settings.')
+            self.options = dce_settings.save(self.config, values)
+        return self.settings_snapshot()
+
+    def save_token(self, token):
+        if not isinstance(token, str) or not 16 <= len(token.strip()) <= 4096 or any(c.isspace() for c in token.strip()):
+            raise ValueError('Paste the Authorization token only, without a header name or spaces.')
+        with self.lock:
+            if self.running or self.catalog['loading']:
+                raise ValueError('Wait for the current operation before changing the token.')
+            if os.environ.get('DCE_TOKEN'):
+                raise ValueError('DCE_TOKEN is set in the environment. Update it there and restart the app.')
+            dce_settings.atomic_write(dce.TOKEN_FILE, token.strip())
+            self.catalog.update(guilds=None, channels={}, threadModes={}, error=None)
+        return self.settings_snapshot()
 
     def catalog_snapshot(self):
         with self.lock:
@@ -94,6 +165,8 @@ class Dashboard:
             rows = discover(guild, threads)
             if guild is None:
                 icons = archived_icons(self.output)
+                with self.lock:
+                    icons.update({g['id']: g['icon_url'] for g in self.catalog['guilds'] or [] if g.get('icon_url')})
                 for row in rows:
                     row['icon_url'] = row.get('icon_url') or icons.get(row['id'])
             if guild is not None:
@@ -225,7 +298,9 @@ class Dashboard:
     def snapshot(self):
         with self.lock:
             result = dict(running=self.running, operation=self.operation, error=self.error,
-                          output=str(self.output), channels=copy.deepcopy(self.rows), logs=list(self.logs))
+                          output=str(self.output), channels=copy.deepcopy(self.rows), logs=list(self.logs),
+                          discovery_loading=self.catalog['loading'], jobs=self.options['jobs'],
+                          version_status=self.version_status)
             icons = {g['name']: g.get('icon_url') for g in self.catalog['guilds'] or []}
             for row in result['channels']:
                 row['server_icon'] = icons.get(row['server']) or self.cfg.get('channels', {}).get(row['name'], {}).get('icon_url')
@@ -247,18 +322,20 @@ class Dashboard:
         with self.lock:
             self.logs.append(dict(time=time.strftime('%H:%M:%S'), channel=name, text=message[-2000:]))
 
-    def start(self, operation, selected):
-        if operation not in ('sync', 'organize'):
+    def start(self, operation, selected, export_options=None):
+        if operation not in ('sync', 'organize', 'export', 'snapshot'):
             raise ValueError('Unknown operation.')
         if not isinstance(selected, list) or not all(isinstance(n, str) for n in selected):
             raise ValueError('Invalid channel selection.')
         names = {r['name'] for r in self.rows}
-        if not selected or not set(selected) <= names:
+        if operation != 'snapshot' and (not selected or not set(selected) <= names):
             raise ValueError('Select at least one existing channel.')
+        options = dce_exports.validate(export_options) if operation == 'export' else None
         with self.lock:
             if self.running:
                 raise ValueError('An operation is already running.')
             self.running, self.operation, self.error = True, operation, None
+            self.export_options = options
             self.cancel.clear()
             for row in self.rows:
                 row.update(status='queued' if row['name'] in selected else 'idle',
@@ -267,15 +344,43 @@ class Dashboard:
             threading.Thread(target=self.run, args=(operation, set(selected)), daemon=True).start()
 
     def export(self, row, token, binary, stage):
-        last = dce.parse_last_after(self.output, row['id'])
+        standalone = self.operation == 'export'
+        last = None if standalone or self.options['full_history'] else dce.parse_last_after(self.output, row['id'])
         cmd = dce._build_export_cmd(binary, token, row['id'], stage, last) + ['--include-threads', 'None']
-        self.update(row, status='downloading', detail=f'Downloading since {last or "the beginning"}', started=time.monotonic())
+        # Supply the token through the environment, not the process list.
+        token_index = cmd.index('-t')
+        del cmd[token_index:token_index + 2]
+        if standalone:
+            format_index = cmd.index('-f')
+            del cmd[format_index:format_index + 2]
+            cmd += dce_exports.arguments(self.export_options)
+        cmd += ['--respect-rate-limits', 'true', '--utc', str(self.options['utc']).lower(),
+                '--markdown', str(self.options['markdown']).lower()]
+        media_dir = stage / 'media' if standalone else self.output / 'media' / row['id']
+        if self.options['media']:
+            media_dir.mkdir(parents=True, exist_ok=True)
+            cmd += ['--media', 'true', '--reuse-media', str(self.options['reuse_media']).lower(),
+                    '--media-dir', str(media_dir)]
+        media_before = sum(p.stat().st_size for p in media_dir.rglob('*') if p.is_file()) if self.options['media'] else 0
+        def downloaded_bytes():
+            total = sum(p.stat().st_size for p in stage.rglob('*') if p.is_file())
+            if self.options['media'] and not standalone:
+                total += max(0, sum(p.stat().st_size for p in media_dir.rglob('*') if p.is_file()) - media_before)
+            return total
+        self.update(row, status='downloading' , detail=f'Downloading since {last or "the beginning"}', started=time.monotonic())
         self.log(row['name'], row['detail'])
-        for attempt in range(3):
+        for attempt in range(self.options['retries'] + 1):
             if self.cancel.is_set():
                 return False
+            # A failed attempt can leave truncated or differently partitioned files.
+            # Never mix those with the successful retry.
+            if attempt:
+                for leftover in stage.iterdir():
+                    if leftover.is_file():
+                        leftover.unlink()
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, encoding='utf-8', errors='replace', bufsize=1)
+                                    text=True, encoding='utf-8', errors='replace', bufsize=1,
+                                    env=dict(os.environ, DISCORD_TOKEN=token))
             def read_output():
                 for line in proc.stdout:
                     self.log(row['name'], line, token)
@@ -294,7 +399,7 @@ class Dashboard:
                         except subprocess.TimeoutExpired:
                             proc.kill()
                         break
-                    size = sum(p.stat().st_size for p in stage.rglob('*') if p.is_file())
+                    size = downloaded_bytes()
                     self.update(row, downloaded=size)
                 proc.wait()
             finally:
@@ -305,65 +410,95 @@ class Dashboard:
                 proc.stdout.close()
             if self.cancel.is_set():
                 return False
-            self.update(row, downloaded=sum(p.stat().st_size for p in stage.rglob('*') if p.is_file()))
+            self.update(row, downloaded=downloaded_bytes())
             if proc.returncode == 0:
                 return True
-            if attempt < 2:
-                self.update(row, detail=f'Retrying download ({attempt + 2}/3)', percent=None)
+            if attempt < self.options['retries']:
+                self.update(row, detail=f"Retrying download ({attempt + 2}/{self.options['retries'] + 1})", percent=None)
                 self.log(row['name'], f'Exporter exited with code {proc.returncode}; retrying in {2 ** (attempt + 1)} s.')
                 if self.cancel.wait(2 ** (attempt + 1)):
                     return False
         raise RuntimeError(f'Exporter failed (exit code {proc.returncode}). See the activity log for details.')
 
+    def run_channel(self, row, operation, token, binary):
+        if self.cancel.is_set():
+            self.update(row, status='cancelled', detail='Stopped')
+            return
+        stage = None
+        try:
+            incoming = None
+            pulled = None
+            if operation in ('sync', 'export'):
+                parent = self.output / ('reports' if operation == 'export' else '.downloads')
+                parent.mkdir(parents=True, exist_ok=True)
+                stage = parent / f'.partial-{row["id"]}-{uuid4().hex}'
+                stage.mkdir(parents=True)
+                # Anchor at start, not finish: a run crossing midnight must overlap.
+                pulled = date.today()
+                if not self.export(row, token, binary, stage):
+                    self.update(row, status='cancelled', detail='Stopped; archive unchanged')
+                    shutil.rmtree(stage)
+                    return
+                if operation == 'export':
+                    extension = dce_exports.FORMATS[self.export_options['format']]
+                    if not list(stage.glob('*' + extension)):
+                        raise ValueError('Exporter produced no output files. See the activity log.')
+                    destination = parent / f'{date.today()}-{row["id"]}-{uuid4().hex[:8]}'
+                    os.replace(stage, destination)
+                    self.update(row, status='done', percent=100, detail=f'Export saved in reports/{destination.name}')
+                    self.log(row['name'], row['detail'])
+                    return
+                incoming = sorted(stage.glob('*.json'))
+                if not incoming:
+                    raise ValueError('Exporter produced no JSON. Archive unchanged.')
+            if self.cancel.is_set():
+                self.update(row, status='cancelled', detail='Stopped; downloaded data remains in .downloads')
+                return
+            self.update(row, status='merging', detail='Waiting to merge archive', percent=None)
+            with self.merge_lock:
+                if self.cancel.is_set():
+                    self.update(row, status='cancelled', detail='Stopped; downloaded data remains in .downloads')
+                    return
+                self.update(row, detail='Validating and merging messages')
+                result = consolidate(self.output, row['name'], self.cfg['channels'][row['name']], incoming, pulled)
+            self.update(row, **result, status='done', detail='Archive saved', percent=100,
+                        elapsed=round(time.monotonic() - row['started']) if row['started'] else 0)
+            self.log(row['name'], f'Saved {result["messages"]:,} messages · merged {result["duplicates"]:,} duplicates.')
+            if stage and not any(stage.iterdir()):
+                stage.rmdir()
+        except Exception as exc:
+            message = str(exc).replace(token, '[redacted token]') if token else str(exc)
+            self.update(row, status='error', detail=message)
+            self.log(row['name'], message)
+
     def run(self, operation, selected):
         token = ''
         try:
             with archive_lock(self.output):
-                if operation == 'sync':
+                if operation == 'snapshot':
+                    self.version_status = 'Preparing snapshot…'
+                    target = dce_versions.snapshot(self.output, self.config, self.output.parent / (self.output.name + '-versions'),
+                                                  self.cancel, lambda done, total: setattr(self, 'version_status', f'Archiving {done}/{total} files'))
+                    self.version_status = f'Saved {target.name}'
+                    self.log('Archive', self.version_status)
+                    return
+                if operation in ('sync', 'export'):
                     try:
                         token = dce.load_token(None)
                         binary = dce.find_dce_binary()
                     except SystemExit:
                         raise RuntimeError('Missing token or DiscordChatExporter.Cli. Check your installation and run dce token set.') from None
-                for row in self.rows:
-                    if row['name'] not in selected:
-                        continue
-                    if self.cancel.is_set():
-                        self.update(row, status='cancelled', detail='Stopped')
-                        continue
-                    stage = None
-                    try:
-                        incoming = None
-                        pulled = None
-                        if operation == 'sync':
-                            stage = self.output / '.downloads' / f'{row["id"]}-{uuid4().hex}'
-                            stage.mkdir(parents=True)
-                            # Anchor at start, not finish: a run crossing midnight must overlap.
-                            pulled = date.today()
-                            if not self.export(row, token, binary, stage):
-                                self.update(row, status='cancelled', detail='Stopped; archive unchanged')
-                                shutil.rmtree(stage)
-                                continue
-                            incoming = sorted(stage.glob('*.json'))
-                            if not incoming:
-                                raise ValueError('Exporter produced no JSON. Archive unchanged.')
-                        if self.cancel.is_set():
-                            self.update(row, status='cancelled', detail='Stopped; downloaded data remains in .downloads')
-                            continue
-                        self.update(row, status='merging', detail='Validating and merging messages', percent=None)
-                        result = consolidate(self.output, row['name'], self.cfg['channels'][row['name']], incoming, pulled)
-                        self.update(row, **result, status='done', detail='Archive saved', percent=100,
-                                    elapsed=round(time.monotonic() - row['started']) if row['started'] else 0)
-                        self.log(row['name'], f'Saved {result["messages"]:,} messages · merged {result["duplicates"]:,} duplicates.')
-                        if stage and not any(stage.iterdir()):
-                            stage.rmdir()
-                    except Exception as exc:
-                        message = str(exc).replace(token, '[redacted token]') if token else str(exc)
-                        self.update(row, status='error', detail=message)
-                        self.log(row['name'], message)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=self.options['jobs']) as pool:
+                    futures = [pool.submit(self.run_channel, row, operation, token, binary if operation in ('sync', 'export') else None)
+                               for row in self.rows if row['name'] in selected]
+                    for future in concurrent.futures.as_completed(futures):
+                        future.result()
+
         except Exception as exc:
             with self.lock:
                 self.error = str(exc).replace(token, '[redacted token]') if token else str(exc)
+                if operation == 'snapshot':
+                    self.version_status = 'Snapshot stopped' if self.cancel.is_set() else 'Snapshot failed'
                 for row in self.rows:
                     if row['status'] == 'queued':
                         row.update(status='error', detail=self.error)
@@ -373,6 +508,11 @@ class Dashboard:
 
 
 def make_handler(app, secret):
+    # A running backend must serve the same UI throughout its lifetime, even
+    # when a checkout is updated. Restart the app to activate a new build.
+    assets = {'/icon.svg': ('icon.svg', 'image/svg+xml'), '/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
+    assets = {path: (files('dce_ui').joinpath(name).read_text(encoding='utf-8'), mime)
+              for path, (name, mime) in assets.items()}
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
@@ -394,12 +534,13 @@ def make_handler(app, secret):
 
         def do_GET(self):
             path = urlparse(self.path).path
-            assets = {'/icon.svg': ('icon.svg', 'image/svg+xml'), '/': ('index.html', 'text/html; charset=utf-8'), '/app.js': ('app.js', 'text/javascript; charset=utf-8'), '/style.css': ('style.css', 'text/css; charset=utf-8')}
             if path in assets:
                 asset, mime = assets[path]
-                return self.reply(200, files('dce_ui').joinpath(asset).read_text(encoding='utf-8'), mime)
+                return self.reply(200, asset, mime)
             if not self.authorized():
                 return self.reply(403, {'error': 'Open the app using dce app.'})
+            if path == '/api/settings':
+                return self.reply(200, app.settings_snapshot())
             if path == '/api/catalog':
                 return self.reply(200, app.catalog_snapshot())
             if path == '/api/state':
@@ -416,17 +557,20 @@ def make_handler(app, secret):
                 body = json.loads(self.rfile.read(length))
                 if not isinstance(body, dict):
                     raise ValueError('Request body must be an object.')
-                if self.path == '/api/discover':
+                if self.path == '/api/settings':
+                    return self.reply(200, app.save_settings(body.get('options')))
+                elif self.path == '/api/token':
+                    return self.reply(200, app.save_token(body.get('token')))
+                elif self.path == '/api/discover':
                     app.load_catalog(body.get('guild'), body.get('refresh', False), body.get('threads', 'None'))
                 elif self.path == '/api/channels/add':
                     return self.reply(200, app.add_channels(body.get('channels'), body.get('sync', False)))
                 elif self.path == '/api/start':
-                    app.start(body['operation'], body['channels'])
+                    app.start(body['operation'], body['channels'], body.get('options'))
                 elif self.path == '/api/cancel':
                     app.cancel.set()
                 elif self.path == '/api/open':
-                    app.output.mkdir(parents=True, exist_ok=True)
-                    subprocess.Popen(['open' if os.sys.platform == 'darwin' else 'xdg-open', str(app.output)])
+                    return self.reply(200, app.open_folder(body.get('location', 'archive'), body.get('channel')))
                 else:
                     return self.reply(404, {'error': 'Not found'})
                 self.reply(200, {'ok': True})
